@@ -1,0 +1,57 @@
+{
+  "_meta": {
+    "description": "题材级反向约束（反 stock 训练数据）。pending=true 表示 wiki 暂无实证案例，使用默认通用黑名单。",
+    "source": "obstian/outputs/2026-05-21_storyboard-node-spec/spec.md 第六节"
+  },
+  "classical-dance": {
+    "label": "古典舞",
+    "pending": false,
+    "constraints": [
+      "不要黑色舞台 / 不要空背景 / 不要现代摄影棚",
+      "不要夸张仙侠特效 / 不要廉价仙侠影楼感",
+      "不要悬浮 / 不要飞天 / 不要魔法光效 / 不要过度 CG 特效",
+      "不要乌漆麻黑 / 不要浑浊 / 不要色斑",
+      "不要让相邻两格过于相似（保持动作连续但区分度足够）"
+    ]
+  },
+  "anime-sport": {
+    "label": "动漫体育",
+    "pending": false,
+    "constraints": [
+      "不要写实摄影质感",
+      "不要静态构图",
+      "不要传统三维渲染感",
+      "不要柔和过渡（保留分镜冲击感）"
+    ]
+  },
+  "architecture-construction": {
+    "label": "建筑装配",
+    "pending": false,
+    "constraints": [
+      "不要出现人物 / 车辆 / 现代机械",
+      "不要出现脚手架 / 工人",
+      "不要出现文字标注 / 广告牌",
+      "不要让第 N-1 格和第 N 格过于相似"
+    ]
+  },
+  "food-preparation": {
+    "label": "美食制作",
+    "pending": true,
+    "constraints": [
+      "不要出现品牌 logo",
+      "不要出现戴戒指或美甲的手"
+    ]
+  },
+  "mechanical-assembly": {
+    "label": "机械装配",
+    "pending": true,
+    "constraints": []
+  },
+  "_default": {
+    "label": "通用",
+    "constraints": [
+      "不要让相邻两格过于相似",
+      "不要出现品牌 logo 或文字水印"
+    ]
+  }
+}

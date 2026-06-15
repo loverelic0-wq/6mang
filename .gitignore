@@ -1,0 +1,15 @@
+.chrome-profile/
+.chrome-template-check/
+.chrome-*-profile/
+.edge-*-profile/
+.env
+.huobao-settings.json
+.huobao-settings.json.bak.*
+output/
+data/
+node_modules/
+*.log
+tapcanvas-screenshot.png
+tapcanvas-mobile-screenshot.png
+tapnow-canvas-screenshot.png
+huobao-canvas-screenshot.png
