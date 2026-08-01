@@ -5,6 +5,7 @@
   "type": "commonjs",
   "scripts": {
     "dev": "node server/server.js",
-    "start": "node server/server.js"
+    "start": "node server/server.js",
+    "test": "node --test server/*.test.js"
   }
 }
