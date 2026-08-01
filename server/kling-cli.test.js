@@ -9,7 +9,14 @@ try {
   klingModule = require("./kling-cli");
 } catch {}
 
-const { createKlingCli, normalizeCapabilities, normalizeTask, buildGenerationArgs } = klingModule;
+const {
+  createKlingCli,
+  normalizeCapabilities,
+  normalizeTask,
+  buildGenerationArgs,
+  isKlingProvider,
+  usesCanvasBilling,
+} = klingModule;
 
 function createFixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kling-cli-test-"));
@@ -34,7 +41,7 @@ if (command === "echo") {
       image_to_video: { models: [{
         model: "kling-v3",
         alias: "可灵3.0, v3",
-        arguments: [{ name: "prompt", required: false }, { name: "duration", default: "5", allowedValues: ["5", "10"] }],
+        arguments: [{ name: "prompt", required: false }, { name: "duration", required: true, default: "5", allowedValues: ["5", "10"] }],
         inputs: [{ name: "first_image", required: true }, { name: "tail_image", required: false }]
       }] }
     }
@@ -232,6 +239,22 @@ test("submit rejects parameter values not declared by the selected model", async
   }), /duration.*99.*可选值/);
 });
 
+test("submit accepts an omitted required argument when the CLI declares a default", async (t) => {
+  const fixture = createFixture();
+  t.after(() => fs.rmSync(fixture.dir, { recursive: true, force: true }));
+  const cli = createKlingCli({ cliScriptPath: fixture.script });
+
+  const result = await cli.submit({
+    tool: "image_to_video",
+    model: "kling-v3",
+    prompt: "使用模型默认时长",
+    params: {},
+    images: ["https://cdn.example/input.png"],
+  });
+
+  assert.equal(result.id, "generated-123");
+});
+
 test("queryTask returns the normalized completed resource", async (t) => {
   const fixture = createFixture();
   t.after(() => fs.rmSync(fixture.dir, { recursive: true, force: true }));
@@ -252,7 +275,19 @@ test("OAuth login is a singleton and reaches a successful terminal snapshot", as
   const second = cli.startLogin();
   assert.equal(first.status, "waiting");
   assert.equal(second.startedAt, first.startedAt);
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  for (let attempt = 0; attempt < 20 && cli.loginSnapshot().status === "waiting"; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 
   assert.equal(cli.loginSnapshot().status, "succeeded");
+});
+
+test("only the managed Kling CLI provider bypasses canvas billing", () => {
+  assert.equal(typeof isKlingProvider, "function", "isKlingProvider should be exported");
+  assert.equal(typeof usesCanvasBilling, "function", "usesCanvasBilling should be exported");
+
+  assert.equal(isKlingProvider({ adapter: "kling-cli" }), true);
+  assert.equal(usesCanvasBilling({ adapter: "kling-cli" }), false);
+  assert.equal(usesCanvasBilling({ adapter: "http", apiKey: "secret" }), true);
+  assert.equal(usesCanvasBilling({ apiKey: "secret" }), true);
 });

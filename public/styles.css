@@ -210,13 +210,18 @@ details.storyboard-section > summary.storyboard-section-title {
 
 /* 图片对比节点 */
 .node[data-type="imageCompare"] .node-body {
-  display: flex;
+  display: block;
   padding: 10px;
+}
+
+/* 比例由输入图驱动（见 setupCompareStages），节点高度跟随舞台收缩、不强制方形 */
+.node[data-type="imageCompare"],
+.node[data-type="imageCompare"] .node-card {
+  min-height: 0;
 }
 
 .compare-stage {
   position: relative;
-  flex: 1;
   width: 100%;
   min-height: 180px;
   overflow: hidden;
@@ -2011,10 +2016,38 @@ svg {
   line-height: 1.45;
 }
 
+.storyboard-assistant-output {
+  flex: 1 1 auto;
+  min-height: 96px;
+  max-height: 150px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  border-radius: 9px;
+  padding: 9px;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .node[data-type="promptOptimizer"] .node-body {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.node[data-type="storyboardAssistant"] .node-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.node[data-type="storyboardAssistant"] .node-body > .node-row,
+.node[data-type="storyboardAssistant"] .node-body > .node-indicators,
+.node[data-type="storyboardAssistant"] .node-body > .storyboard-assistant-output,
+.node[data-type="storyboardAssistant"] .node-body > .node-button {
+  flex: 0 0 auto;
+  margin-top: 0;
 }
 
 .node[data-type="promptOptimizer"] .node-body > .node-row,
@@ -3131,6 +3164,130 @@ body.dark .indicator.ref-mention:hover {
 .node-row.model3d-meta b {
   color: var(--accent-color);
   font-weight: 600;
+}
+
+/* 可灵 CLI OAuth 与动态能力 */
+.kling-status-card {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--panel) 90%, #f59e0b 10%);
+}
+
+.kling-status-card.connected {
+  border-color: color-mix(in srgb, #22c55e 48%, var(--border));
+  background: color-mix(in srgb, var(--panel) 91%, #22c55e 9%);
+}
+
+.kling-status-line,
+.kling-status-meta,
+.kling-settings-actions,
+.kling-node-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+
+.kling-status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 0 4px color-mix(in srgb, #f59e0b 16%, transparent);
+}
+
+.kling-status-card.connected .kling-status-dot {
+  background: #22c55e;
+  box-shadow: 0 0 0 4px color-mix(in srgb, #22c55e 16%, transparent);
+}
+
+.kling-status-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.kling-status-meta span {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel) 70%, var(--border));
+}
+
+.kling-settings-actions {
+  margin: 14px 0;
+}
+
+.kling-settings-error {
+  color: #dc2626;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.kling-model-list {
+  display: grid;
+  gap: 7px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.kling-model-list > div {
+  display: grid;
+  grid-template-columns: minmax(100px, .8fr) minmax(140px, 1fr);
+  gap: 4px 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+
+.kling-model-list code,
+.kling-model-list span {
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.kling-model-list span {
+  grid-column: 1 / -1;
+}
+
+.kling-node-panel {
+  display: grid;
+  gap: 7px;
+  margin: 8px 0;
+  padding: 9px;
+  border: 1px solid color-mix(in srgb, #f59e0b 38%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 94%, #f59e0b 6%);
+}
+
+.kling-node-head {
+  justify-content: space-between;
+  font-size: 11px;
+  color: #b45309;
+}
+
+.kling-node-head small {
+  color: var(--muted);
+}
+
+.kling-param-row {
+  margin: 0;
+}
+
+.kling-param-row > span {
+  max-width: 112px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kling-param-row input,
+.kling-param-row select {
+  min-width: 0;
+  flex: 1;
 }
 
 /* 3D 取景浮层（独立于画布 world，避免被 render() 全量重建冲掉） */

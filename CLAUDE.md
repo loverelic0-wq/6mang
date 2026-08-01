@@ -8,7 +8,7 @@
 
 ## 启动
 
-- `npm run dev` / `npm start` —— 两条都是 `node server/server.js`，**没有** 构建步骤、测试、lint。
+- `npm run dev` / `npm start` —— 两条都是 `node server/server.js`，没有构建步骤；`npm test` 运行 `node --test server/*.test.js`。
 - `quick-start.cmd` —— Windows 一键启动：缺 `.env` 时从 `.env.example` 生成，启动后浏览器自动打开 `http://${HOST}:${PORT}`（默认 `127.0.0.1:8787`）。
 - **Node 22+ 必需**：`server/db.js` 使用 `require("node:sqlite")`（Node 22 起内置）。之前 README 说的 "Node 18+" 已经不准确。
 - **`node_modules` 不存在也是对的**：项目零 npm 依赖，所有功能用 Node 内置模块（`http` / `node:sqlite` / `crypto` / 全局 `fetch`）。不要加 Express、dotenv、bcrypt、better-sqlite3 等。
@@ -28,7 +28,7 @@
 
 ### 鉴权 + 计费（核心，文档之前完全没写）
 
-**所有出钱的 API 都必须先 `requireUser(req)`**（401 if 没登录）。处理流程是固定三段式：
+**所有调用生成服务的 API 都必须先 `requireUser(req)`**（401 if 没登录）。普通 HTTP provider 的处理流程是固定三段式：
 
 ```
 db.adjustBalance(-cost)   // 先扣，不够会抛 402
@@ -43,7 +43,7 @@ try {
 }
 ```
 
-**修改任何调上游的接口时，必须保持「先扣 → try → 失败退款 + 失败记账」结构。** 漏退款 = 用户白付钱；漏 try/catch = 调用失败但钱已扣。
+**修改普通 HTTP provider 的接口时，必须保持「先扣 → try → 失败退款 + 失败记账」结构。** 漏退款 = 用户白付钱；漏 try/catch = 调用失败但钱已扣。唯一例外是托管的 `adapter: "kling-cli"` provider：它使用用户本机可灵 OAuth/灵感值，必须在扣画布余额前分流，不写 `transactions` / `api_usage`。
 
 **计费表** 写死在 `server.js` 顶部 `modelCostRules`：
 - `chat`: 默认 1（覆盖 `/api/chat/polish` 和 `/api/chat/optimize-prompt`）
@@ -85,6 +85,17 @@ try {
 **模型→上游的分配靠 providerId 显式路由**（不再按模型名前缀嗅探）。前端调任何花钱接口都必须在 body / query 里带上节点选中的 `providerId`，后端 `getProvider(kind, providerId)` 据此挑出 baseUrl/apiKey；`providerId` 为空回退到该 kind 的 `default` 子类。**不要再加 `pickXxxService` 这种按模型名硬编码路由的函数。**
 
 **Midjourney** 是它自己的提交-轮询协议：`POST /mj/submit/imagine` 返回 `code` + `result`（taskId），前端轮询 `GET /mj/task/<id>/fetch`。响应 `code` 中 `1` 和 `22` 都算成功（22 是排队中），`24` 映射成 HTTP 402（额度不足）。MJ 路由同样接 `providerId`。
+
+### 可灵 CLI 托管 provider
+
+`server/kling-cli.js` 是 `@klingai/cli-cn` 的安全进程适配器：直接 `spawn(process.execPath, [cliScript, ...args])`，不经过 shell；统一处理超时、JSON、OAuth 单例、data URL 临时文件、任务查询和错误。默认自动发现全局 npm 安装，也可用 `KLING_CLI_JS` 指定入口。
+
+- 图片/视频配置中始终注入 id 为 `kling-cli`、`adapter: "kling-cli"`、`managed: true` 的 provider；它不允许在设置页修改 Base URL/API Key 或删除。
+- `who_am_i --quiet` 是能力真源，`publicProvidersStatus()` 把当前账号的模型、工具、参数、默认值、枚举值和素材槽位动态合并给前端；不要写死可灵模型表。
+- OAuth 由 `/api/kling/login|logout|status|refresh` 驱动。Token 只由 CLI 写入 `~/.kling/.credentials`，服务端和前端都不读取、不复制、不落库。
+- `/api/images/generations` 根据参考图选择 `text_to_image` / `image_to_image`；`/api/video/create` 选择 `text_to_video` / `image_to_video`；结果统一经 `/api/kling/tasks/:id` 轮询回现有输出节点。
+- 可灵请求仍要求画布用户登录，但必须在 `db.adjustBalance()` 前分支；`usesCanvasBilling(provider)` 是计费边界的显式判定。
+- `public/kling-provider.js` 是无构建 UMD helper，负责能力过滤、动态字段、参数序列化和必填素材验证；`public/app.js` 只负责把它接到既有节点与设置面板。
 
 ### `/api/image-proxy`（SSRF 保护）
 
@@ -128,6 +139,7 @@ try {
 | `promptOptimizer` | 提示词优化 | 调 `/api/chat/optimize-prompt`，输出 6 字段 |
 | `imageConfig` | 文生图配置 | `generateImage` |
 | `storyboardConfig` | 故事板生成 | `generateStoryboard`，会展开多帧 |
+| `faceSwapConfig` | 换脸 | `generateFaceSwap`；接两张图片，按连线顺序 ①底图(保留)/②脸源(取脸)；指令式编辑（复用 `/api/images/generations` 多参考图 + `FACE_SWAP_PROMPT`，让模型在底图光照下重生成脸而非抠图粘贴），输出尺寸用 `nearestByAspect` 跟随底图比例；零后端改动，按 image 费率计费 |
 | `videoConfig` | 视频生成配置 | `generateVideo` |
 | `image` | 图片节点 / 载入图像 / 历史图片 | `data.url=false` 是待上传状态 |
 | `video` | 视频节点 / 载入视频 | 异步任务 `taskId` 轮询；空态支持 点击/拖入/粘贴 载入本地视频（blob 走 IndexedDB，`idb-image:` 哨兵） |

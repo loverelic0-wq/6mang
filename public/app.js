@@ -652,6 +652,16 @@ function getProviderGroup(kind) {
   return backendConfig.providers?.[kind] || { default: "", items: {} };
 }
 
+function getProviderItem(kind, providerId = "") {
+  const group = getProviderGroup(kind);
+  const pid = providerId && group.items?.[providerId] ? providerId : group.default;
+  return group.items?.[pid] || null;
+}
+
+function isKlingProviderItem(item) {
+  return item?.adapter === "kling-cli";
+}
+
 function getDefaultProviderAndModel(kind) {
   const group = getProviderGroup(kind);
   const providerId = group.default && group.items[group.default] ? group.default : Object.keys(group.items)[0] || "";
@@ -668,7 +678,7 @@ function findProviderForModel(kind, modelId) {
 }
 
 function ensureNodeProvider(node) {
-  const kindMap = { llmConfig: "chat", promptOptimizer: "chat", imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", videoConfig: "video" };
+  const kindMap = { llmConfig: "chat", storyboardAssistant: "chat", promptOptimizer: "chat", imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", faceSwapConfig: "image", videoConfig: "video" };
   const kind = kindMap[node.type];
   if (!kind) return;
   const group = getProviderGroup(kind);
@@ -764,6 +774,7 @@ function getVideoSizeValue(model, size) {
 const nodeSizes = {
   text: { width: 260, height: 210 },
   llmConfig: { width: 300, height: 230 },
+  storyboardAssistant: { width: 360, height: 390 },
   promptOptimizer: { width: 320, height: 280 },
   imageConfig: { width: 300, height: 260 },
   image: { width: 260, height: 350 },
@@ -773,6 +784,7 @@ const nodeSizes = {
   templateImageConfig: { width: 320, height: 360 },
   imageCompare: { width: 320, height: 320 },
   imageExpand: { width: 320, height: 400 },
+  faceSwapConfig: { width: 300, height: 250 },
   model3dPreview: { width: 280, height: 330 },
 };
 
@@ -818,7 +830,7 @@ function defaultState() {
         id: imageConfigId,
         type: "imageConfig",
         position: { x: 430, y: 110 },
-        data: { label: "文生图", model: getDefaultModel("image"), quality: "标准画质", size: "2048x2048", executed: true },
+        data: { label: "图片生成", model: getDefaultModel("image"), quality: "标准画质", size: "2048x2048", executed: true },
       },
       {
         id: imageId,
@@ -923,7 +935,7 @@ function normalizeModelValue(kind, value) {
   return String(value);
 }
 
-function modelOptionsForNode(kind, providerId, model) {
+function modelOptionsForNode(kind, providerId, model, activeTool = "") {
   const group = getProviderGroup(kind);
   const items = Object.entries(group.items);
   if (!items.length) {
@@ -932,19 +944,103 @@ function modelOptionsForNode(kind, providerId, model) {
   const selectedKey = makeModelKey(providerId || "", model || "");
   let foundMatch = false;
   const groups = items.map(([pid, item]) => {
-    const opts = (item.models || []).map((m) => {
+    const providerModels = activeTool && isKlingProviderItem(item) && window.KlingProvider
+      ? window.KlingProvider.modelsForTool(item, activeTool)
+      : (item.models || []);
+    const opts = providerModels.map((m) => {
       const key = makeModelKey(pid, m.id);
       const isSelected = key === selectedKey;
       if (isSelected) foundMatch = true;
       return `<option value="${escapeHtmlAttr(key)}"${isSelected ? " selected" : ""}>${escapeHtml(m.label || m.id)}</option>`;
     }).join("");
-    return `<optgroup label="${escapeHtmlAttr(item.label || pid)}">${opts}</optgroup>`;
+    const empty = !opts && isKlingProviderItem(item)
+      ? `<option value="" disabled>${item.authenticated ? "当前模式暂无可用模型" : "请先在设置中登录"}</option>`
+      : "";
+    return `<optgroup label="${escapeHtmlAttr(item.label || pid)}">${opts || empty}</optgroup>`;
   }).join("");
   if (model && !foundMatch) {
     const warn = `<option value="${escapeHtmlAttr(selectedKey)}" selected>⚠ 未配置: ${escapeHtml(model)}</option>`;
     return warn + groups;
   }
   return groups;
+}
+
+function klingToolForNode(node, kind) {
+  if (!window.KlingProvider || !node) return "";
+  const hasImages = getImageReferenceSlots(node.id).length > 0;
+  return window.KlingProvider.toolFor(kind, hasImages);
+}
+
+function klingStoredParams(node, model = node?.data?.model) {
+  return node?.data?.dynamicParams?.["kling-cli"]?.[model] || {};
+}
+
+function klingContextForNode(node, kind) {
+  const provider = getProviderItem(kind, node?.data?.providerId);
+  if (!isKlingProviderItem(provider) || !window.KlingProvider) return null;
+  const tool = klingToolForNode(node, kind);
+  const models = window.KlingProvider.modelsForTool(provider, tool);
+  const model = models.find((entry) => entry.id === node.data.model);
+  const spec = model?.specs?.[tool] || null;
+  return { provider, tool, models, model, spec };
+}
+
+function getKlingRequestParams(node, kind, connectedImages) {
+  const context = klingContextForNode(node, kind);
+  if (!context) return null;
+  if (!context.model || !context.spec) throw new Error(`当前模式 ${context.tool} 不支持模型 ${node.data.model || "（未选择）"}`);
+  window.KlingProvider.validateInputs(context.spec, connectedImages);
+  return window.KlingProvider.serializeParams(context.spec, klingStoredParams(node));
+}
+
+function renderKlingDynamicParams(node, kind) {
+  const context = klingContextForNode(node, kind);
+  if (!context) return "";
+  if (!context.model || !context.spec) {
+    return `<div class="kling-node-panel"><div class="storyboard-warn">当前输入模式没有匹配模型，请重新选择模型。</div></div>`;
+  }
+  const stored = klingStoredParams(node);
+  const fields = window.KlingProvider.fieldsForSpec(context.spec, stored);
+  const hasAspectRatio = fields.some((field) => field.name === "aspect_ratio");
+  const derivedVideoRatio = kind === "video" && !hasAspectRatio
+    ? `<div class="node-row kling-param-row"><span>比例</span><b>${getImageReferenceSlots(node.id).length ? "跟随首图" : "跟随实际视频"}</b></div>`
+    : "";
+  const fieldLabels = {
+    aspect_ratio: "比例",
+    duration: "时长",
+    resolution: "分辨率",
+    imageCount: "生成数量",
+    prefer_multi_shots: "多镜头",
+    enable_audio: "音频",
+  };
+  const inputNames = (context.spec.inputs || []).map((input) => `${input.name}${input.required ? "*" : ""}`).join(" · ");
+  const toolLabels = {
+    text_to_image: "文生图",
+    image_to_image: "参考图生图",
+    text_to_video: "文生视频",
+    image_to_video: "图生视频",
+  };
+  const rows = fields.map((field) => {
+    const title = field.description ? ` title="${escapeHtmlAttr(field.description)}"` : "";
+    let control;
+    if (field.options.length) {
+      control = `<select data-kling-param="${escapeHtmlAttr(field.name)}">${field.options.map((value) => {
+        const label = field.kind === "boolean" ? (value === "true" ? "开启" : "关闭") : value;
+        return `<option value="${escapeHtmlAttr(value)}"${value === field.value ? " selected" : ""}>${escapeHtml(label)}</option>`;
+      }).join("")}</select>`;
+    } else {
+      control = `<input type="text" data-kling-param="${escapeHtmlAttr(field.name)}" value="${escapeHtmlAttr(field.value)}" placeholder="${escapeHtmlAttr(field.defaultValue ? `默认 ${field.defaultValue}` : field.required ? "必填" : "可选")}">`;
+    }
+    return `<div class="node-row kling-param-row"${title}><span>${escapeHtml(fieldLabels[field.name] || field.name)}${field.required ? " *" : ""}</span>${control}</div>`;
+  }).join("");
+  return `
+    <div class="kling-node-panel">
+      <div class="kling-node-head"><span>可灵 CLI · ${escapeHtml(toolLabels[context.tool] || context.tool)}</span><small>动态参数</small></div>
+      ${derivedVideoRatio}
+      ${rows || '<div class="node-tip">此模型没有额外参数，使用服务端默认值。</div>'}
+      ${inputNames ? `<div class="node-tip">素材槽位：${escapeHtml(inputNames)}</div>` : ""}
+    </div>
+  `;
 }
 
 function escapeHtmlAttr(value) {
@@ -983,15 +1079,100 @@ const API_KEY_KEEP_SENTINEL_CLIENT = "__keep__";
 let settingsDraft = null;
 let settingsActiveKind = "chat";
 let settingsActiveProviderId = "";
+let klingUiState = { installed: false, authenticated: false, login: { status: "idle" }, account: null, loading: false, error: "" };
+let klingLoginPollTimer = null;
+
+function stopKlingLoginPolling() {
+  if (klingLoginPollTimer) clearInterval(klingLoginPollTimer);
+  klingLoginPollTimer = null;
+}
+
+async function refreshKlingUi({ refresh = false, includeAccount = true, rerender = true } = {}) {
+  klingUiState = { ...klingUiState, loading: true, error: "" };
+  if (rerender && settingsDraft) renderSettingsModal();
+  try {
+    const status = await apiFetch(`/api/kling/status${refresh ? "?refresh=1" : ""}`, { method: "GET" });
+    let account = klingUiState.account;
+    if (includeAccount && status.authenticated) account = await apiFetch("/api/kling/account", { method: "GET" });
+    if (!status.authenticated) account = null;
+    klingUiState = { ...status, account, loading: false, error: "" };
+  } catch (error) {
+    klingUiState = { ...klingUiState, loading: false, error: error.message };
+  }
+  if (rerender && settingsDraft) renderSettingsModal();
+  return klingUiState;
+}
+
+function syncManagedProvidersIntoDraft() {
+  if (!settingsDraft) return;
+  for (const kind of ["image", "video"]) {
+    const live = backendConfig.providers?.[kind]?.items?.["kling-cli"];
+    if (live && settingsDraft[kind]?.items) settingsDraft[kind].items["kling-cli"] = JSON.parse(JSON.stringify(live));
+  }
+}
+
+async function startKlingOAuth() {
+  try {
+    const login = await apiFetch("/api/kling/login", { method: "POST" });
+    klingUiState = { ...klingUiState, login, error: "" };
+    renderSettingsModal();
+    stopKlingLoginPolling();
+    klingLoginPollTimer = setInterval(async () => {
+      const status = await refreshKlingUi({ includeAccount: false, rerender: false });
+      if (status.login?.status === "waiting") {
+        renderSettingsModal();
+        return;
+      }
+      stopKlingLoginPolling();
+      await loadBackendStatus();
+      await refreshKlingUi({ includeAccount: true, rerender: false });
+      syncManagedProvidersIntoDraft();
+      renderSettingsModal();
+      showToast(status.login?.status === "succeeded" ? "可灵 OAuth 登录成功" : `可灵登录失败：${status.login?.error || status.authError || "未知错误"}`);
+    }, 1500);
+  } catch (error) {
+    showToast(`启动可灵登录失败：${error.message}`);
+  }
+}
+
+async function logoutKlingOAuth() {
+  try {
+    await apiFetch("/api/kling/logout", { method: "POST" });
+    stopKlingLoginPolling();
+    await loadBackendStatus();
+    await refreshKlingUi({ includeAccount: false, rerender: false });
+    syncManagedProvidersIntoDraft();
+    renderSettingsModal();
+    showToast("已退出可灵 CLI");
+  } catch (error) {
+    showToast(`退出可灵失败：${error.message}`);
+  }
+}
+
+async function forceRefreshKling() {
+  try {
+    const next = await apiFetch("/api/kling/refresh", { method: "POST" });
+    klingUiState = { ...next, account: next.account || null, loading: false, error: "" };
+    await loadBackendStatus();
+    syncManagedProvidersIntoDraft();
+    renderSettingsModal();
+    showToast("可灵模型与账户信息已刷新");
+  } catch (error) {
+    klingUiState = { ...klingUiState, loading: false, error: error.message };
+    renderSettingsModal();
+    showToast(`刷新可灵失败：${error.message}`);
+  }
+}
 
 async function openSettingsModal() {
   try {
     await loadBackendStatus();
+    await refreshKlingUi({ includeAccount: true, rerender: false });
     settingsDraft = JSON.parse(JSON.stringify(backendConfig.providers));
     for (const kind of ["chat", "image", "video"]) {
       const group = settingsDraft[kind] || { default: "", items: {} };
       for (const item of Object.values(group.items || {})) {
-        item.apiKey = API_KEY_KEEP_SENTINEL_CLIENT;
+        if (!item.managed) item.apiKey = API_KEY_KEEP_SENTINEL_CLIENT;
       }
     }
     settingsActiveKind = "chat";
@@ -1080,10 +1261,13 @@ function buildSettingsProviderList() {
       li.className = "settings-list-item" + (pid === settingsActiveProviderId ? " active" : "");
       li.dataset.settingsProvider = pid;
       const isDefault = group.default === pid;
+      const meta = item.managed || isKlingProviderItem(item)
+        ? (item.authenticated ? `${item.models?.length || 0} 个动态模型` : "OAuth 未连接")
+        : (item.defaultModel || "—");
       li.innerHTML = `
         <button type="button" class="settings-list-pick" data-settings-action="pick-provider" data-pid="${escapeHtmlAttr(pid)}">
           <span class="settings-list-name">${escapeHtml(item.label || pid)}${isDefault ? ' <span class="settings-default-tag">默认</span>' : ""}</span>
-          <span class="settings-list-meta">${escapeHtml(item.defaultModel || "—")}</span>
+          <span class="settings-list-meta">${escapeHtml(meta)}</span>
         </button>
       `;
       list.append(li);
@@ -1104,6 +1288,9 @@ function buildSettingsProviderEditor() {
   }
 
   const isDefault = group.default === settingsActiveProviderId;
+  if (item.managed || isKlingProviderItem(item)) {
+    return buildKlingSettingsEditor(wrap, item, isDefault);
+  }
   const keyEditing = item.apiKey !== API_KEY_KEEP_SENTINEL_CLIENT;
   const keyPlaceholder = keyEditing ? "" : "（保留现有 key，留空不变）";
 
@@ -1157,6 +1344,53 @@ function buildSettingsProviderEditor() {
   return wrap;
 }
 
+function buildKlingSettingsEditor(wrap, item, isDefault) {
+  const loginStatus = klingUiState.login?.status || "idle";
+  const waiting = loginStatus === "waiting";
+  const authenticated = Boolean(klingUiState.authenticated);
+  const account = klingUiState.account || {};
+  const membership = account.membershipTypeDescription || account.membershipType || "—";
+  const credits = account.availableRemainCredits ?? account.availableCredits ?? "—";
+  const stateLabel = !klingUiState.installed
+    ? "未安装 CLI"
+    : waiting ? "等待浏览器授权"
+      : authenticated ? "OAuth 已连接" : "尚未登录";
+  const error = klingUiState.error || klingUiState.authError || klingUiState.login?.error || "";
+  const models = Array.isArray(item.models) ? item.models : [];
+  wrap.classList.add("kling-settings-editor");
+  wrap.innerHTML = `
+    <div class="settings-editor-head">
+      <h3>可灵 CLI</h3>
+      <div class="settings-editor-actions">
+        ${isDefault ? '<span class="settings-default-tag">默认子类</span>' : '<button type="button" class="ghost-button" data-settings-action="set-default">设为默认</button>'}
+      </div>
+    </div>
+    <div class="kling-status-card ${authenticated ? "connected" : ""}">
+      <div class="kling-status-line"><span class="kling-status-dot"></span><strong>${escapeHtml(stateLabel)}</strong></div>
+      <div class="kling-status-meta">
+        <span>CLI ${escapeHtml(klingUiState.version || "—")}</span>
+        <span>${escapeHtml(settingsActiveKind === "image" ? "图片" : "视频")}模型 ${models.length}</span>
+        ${authenticated ? `<span>会员 ${escapeHtml(membership)}</span><span>灵感值 ${escapeHtml(credits)}</span>` : ""}
+      </div>
+      ${waiting ? '<div class="node-tip">授权页面已在系统浏览器打开，请完成登录；此处会自动更新。</div>' : ""}
+      ${error ? `<div class="kling-settings-error">${escapeHtml(error)}</div>` : ""}
+    </div>
+    <div class="kling-settings-actions">
+      <button type="button" class="send-button" data-settings-action="kling-login" ${waiting || klingUiState.loading ? "disabled" : ""}>${authenticated ? "重新登录" : "登录可灵"}</button>
+      ${authenticated ? '<button type="button" class="ghost-button" data-settings-action="kling-logout">退出登录</button>' : ""}
+      <button type="button" class="ghost-button" data-settings-action="kling-refresh" ${waiting || klingUiState.loading ? "disabled" : ""}>刷新能力</button>
+    </div>
+    <div class="settings-models">
+      <div class="settings-models-head"><span>动态模型（${models.length}）</span><small>来自 who_am_i</small></div>
+      <div class="kling-model-list">
+        ${models.map((model) => `<div><strong>${escapeHtml(model.label || model.id)}</strong><code>${escapeHtml(model.id)}</code><span>${escapeHtml((model.tools || []).join(" · "))}</span></div>`).join("") || '<div class="settings-models-empty">登录后自动读取当前账号可用模型。</div>'}
+      </div>
+    </div>
+    <div class="node-tip">OAuth 凭据只保存在本机 ~/.kling/.credentials；画布不会读取或保存 Token。可灵生成不使用画布积分。</div>
+  `;
+  return wrap;
+}
+
 function buildSettingsActions() {
   const actions = document.createElement("div");
   actions.className = "modal-actions";
@@ -1179,8 +1413,21 @@ settingsModal.addEventListener("click", async (event) => {
   const group = settingsDraft[settingsActiveKind];
 
   if (action === "cancel") {
+    stopKlingLoginPolling();
     settingsDraft = null;
     settingsModal.close();
+    return;
+  }
+  if (action === "kling-login") {
+    await startKlingOAuth();
+    return;
+  }
+  if (action === "kling-logout") {
+    await logoutKlingOAuth();
+    return;
+  }
+  if (action === "kling-refresh") {
+    await forceRefreshKling();
     return;
   }
   if (action === "pick-provider") {
@@ -1208,6 +1455,7 @@ settingsModal.addEventListener("click", async (event) => {
     return;
   }
   if (action === "delete-provider") {
+    if (group.items[settingsActiveProviderId]?.managed) return;
     if (!confirm(`确认删除子类「${group.items[settingsActiveProviderId]?.label || settingsActiveProviderId}」？`)) return;
     delete group.items[settingsActiveProviderId];
     const remaining = Object.keys(group.items);
@@ -1218,18 +1466,21 @@ settingsModal.addEventListener("click", async (event) => {
   }
   if (action === "toggle-key") {
     const item = group.items[settingsActiveProviderId];
+    if (item.managed) return;
     item.apiKey = item.apiKey === API_KEY_KEEP_SENTINEL_CLIENT ? "" : API_KEY_KEEP_SENTINEL_CLIENT;
     renderSettingsModal();
     return;
   }
   if (action === "add-model") {
     const item = group.items[settingsActiveProviderId];
+    if (item.managed) return;
     item.models.push({ id: "", label: "" });
     renderSettingsModal();
     return;
   }
   if (action === "delete-model") {
     const item = group.items[settingsActiveProviderId];
+    if (item.managed) return;
     const removed = item.models[idx]?.id;
     item.models.splice(idx, 1);
     if (item.defaultModel === removed) item.defaultModel = item.models[0]?.id || "";
@@ -1256,6 +1507,7 @@ settingsModal.addEventListener("input", (event) => {
   const t = event.target;
   const item = settingsDraft[settingsActiveKind]?.items?.[settingsActiveProviderId];
   if (!item) return;
+  if (item.managed || isKlingProviderItem(item)) return;
   const field = t.dataset.settingsField;
   if (field) {
     item[field] = t.value;
@@ -1278,6 +1530,7 @@ async function saveSettingsDraft() {
       const group = settingsDraft[kind];
       if (!group) continue;
       for (const [pid, item] of Object.entries(group.items)) {
+        if (item.managed || isKlingProviderItem(item)) continue;
         item.models = item.models.filter((m) => m.id && m.id.trim());
         item.models.forEach((m) => { m.id = m.id.trim(); m.label = (m.label || "").trim() || m.id; });
         if (item.defaultModel && !item.models.some((m) => m.id === item.defaultModel)) {
@@ -1296,6 +1549,7 @@ async function saveSettingsDraft() {
         video: response.providers.video || backendConfig.providers.video,
       };
     }
+    stopKlingLoginPolling();
     settingsDraft = null;
     settingsModal.close();
     render();
@@ -1307,8 +1561,8 @@ async function saveSettingsDraft() {
 
 // ===== 快速切换 API 平台 =====
 const NODE_KIND_MAP_CLIENT = {
-  llmConfig: "chat", promptOptimizer: "chat",
-  imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image",
+  llmConfig: "chat", storyboardAssistant: "chat", promptOptimizer: "chat",
+  imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", faceSwapConfig: "image",
   videoConfig: "video",
 };
 
@@ -1321,6 +1575,8 @@ function buildProvidersKeepPayload() {
     for (const [pid, it] of Object.entries(g.items || {})) {
       items[pid] = {
         label: it.label || "",
+        adapter: it.adapter || "http",
+        managed: Boolean(it.managed),
         baseUrl: it.baseUrl || "",
         apiKey: API_KEY_KEEP_SENTINEL_CLIENT,
         defaultModel: it.defaultModel || "",
@@ -1658,7 +1914,7 @@ function getActiveProject() {
 
 async function recordProjectHistory(entry) {
   const project = getActiveProject();
-  if (!project) return;
+  if (!project) return null;
   const item = {
     id: makeId(),
     type: entry.type,
@@ -1674,6 +1930,7 @@ async function recordProjectHistory(entry) {
   saveProjectLibrary();
   if (!historyPanel.hidden) renderHistoryPanel();
 
+  let saveResult = null;
   try {
     const payload = {
       projectId: project.id,
@@ -1695,14 +1952,30 @@ async function recordProjectHistory(entry) {
     } else if (entry.type === "video" && /^https?:\/\//.test(entry.url)) {
       payload.remoteUrl = entry.url;
     }
-    await fetch("/api/history/save", {
+    const response = await fetch("/api/history/save", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    saveResult = await response.json().catch(() => null);
   } catch (error) {
     console.warn("history backend sync failed", error);
   }
+
+  // 视频上游链接是临时签名，刷新即失效；落盘成功后把历史记录的 url 换成持久的本地回流地址。
+  if (entry.type === "video" && saveResult?.ok && saveResult.fileUrl) {
+    item.url = saveResult.fileUrl;
+    saveProjectLibrary();
+    if (!historyPanel.hidden) renderHistoryPanel();
+    return { historyId: item.id, fileUrl: saveResult.fileUrl };
+  }
+  return { historyId: item.id, fileUrl: "" };
+}
+
+// 视频历史的持久播放地址：新记录已是本地回流地址直接用；旧记录只有过期上游链接，用 historyId 回查本地落盘文件。
+function historyVideoSrc(project, item) {
+  if (typeof item.url === "string" && item.url.startsWith("/api/history/file")) return item.url;
+  return `/api/history/file?projectId=${encodeURIComponent(project.id)}&projectName=${encodeURIComponent(project.name || "")}&historyId=${encodeURIComponent(item.id)}`;
 }
 
 function renderHistoryPanel() {
@@ -1716,7 +1989,7 @@ function renderHistoryPanel() {
     const time = new Date(item.createdAt).toLocaleString();
     const isVideo = item.type === "video";
     const media = isVideo
-      ? `<video src="${escapeHtml(item.url)}" muted preload="metadata"></video>`
+      ? `<video src="${escapeHtml(historyVideoSrc(project, item))}" muted preload="metadata" playsinline></video>`
       : `<img data-history-asset="${escapeHtml(item.url)}" alt="" loading="lazy">`;
     return `
       <div class="history-card" data-history-id="${escapeHtml(item.id)}">
@@ -1764,7 +2037,8 @@ async function addHistoryEntryToCanvas(itemId) {
   const size = nodeSizes[item.type === "video" ? "video" : "image"];
   const position = { x: center.x - size.width / 2, y: center.y - size.height / 2 };
   if (item.type === "video") {
-    addNode("video", position, { label: "历史视频", url: item.url, model: item.model });
+    // 用持久的本地回流地址，避免放进画布后又是过期上游链接。
+    addNode("video", position, { label: "历史视频", url: historyVideoSrc(project, item), model: item.model });
   } else {
     addNode("image", position, { label: "历史图片", url: item.url, model: item.model });
   }
@@ -1783,7 +2057,8 @@ historyListEl.addEventListener("click", (event) => {
     if (item.type === "image") {
       openImagePreview(item.url);
     } else {
-      window.open(item.url, "_blank", "noopener");
+      const project = getActiveProject();
+      window.open(project ? historyVideoSrc(project, item) : item.url, "_blank", "noopener");
     }
   } else if (action === "add-to-canvas") {
     void addHistoryEntryToCanvas(itemId);
@@ -2131,7 +2406,7 @@ function renderTemplateCard(template) {
 }
 
 function createTemplateCategory() {
-  const name = window.prompt("新建模板分组", "文生图工作流");
+  const name = window.prompt("新建模板分组", "图片生成工作流");
   if (name === null) return;
   const nextName = name.trim();
   if (!nextName) return;
@@ -2238,6 +2513,7 @@ function render() {
   renderEdges();
   hydrateAssetImages();
   setupExpandStages();
+  setupCompareStages();
   observeNodeResizesForGroups();
   zoomLabel.textContent = `${Math.round(state.view.zoom * 100)}%`;
 }
@@ -2592,6 +2868,24 @@ function renderNodeBody(node) {
     `;
   }
 
+  if (node.type === "storyboardAssistant") {
+    const inputs = incomingNodes(node.id, ["text", "llmConfig", "promptOptimizer"]).length;
+    const output = node.data.output || "连接故事/剧本/概念文本后，生成结构化分镜方案。";
+    return `
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("chat", node.data.providerId, node.data.model)}</select></div>
+      <div class="node-indicators">
+        <span class="indicator ${inputs ? "ready" : ""}">输入 ${inputs || "○"}</span>
+        <span class="indicator ${node.data.output ? "ready" : ""}">分镜 ${node.data.output ? "✓" : "○"}</span>
+      </div>
+      <div class="node-row node-row-col">
+        <span>补充要求</span>
+        <textarea data-field="requirements" spellcheck="false" placeholder="可空。例：广告片、悬疑情绪、需要 Midjourney 和视频提示词">${escapeHtml(node.data.requirements || "")}</textarea>
+      </div>
+      <div class="storyboard-assistant-output">${escapeHtml(output)}</div>
+      <button class="node-button" data-node-action="run-storyboard-assistant">生成分镜方案</button>
+    `;
+  }
+
   if (node.type === "promptOptimizer") {
     const f = node.data.fields || {};
     const inputs = incomingNodes(node.id, ["text"]).length;
@@ -2621,7 +2915,7 @@ function renderNodeBody(node) {
   }
 
   if (node.type === "imageConfig") {
-    const prompts = incomingNodes(node.id, ["text", "llmConfig", "promptOptimizer"]).length;
+    const prompts = incomingNodes(node.id, ["text", "llmConfig", "storyboardAssistant", "promptOptimizer"]).length;
     const refSlots = getImageReferenceSlots(node.id);
     const refIndicators = refSlots.length
       ? refSlots.map((ref) => `
@@ -2631,16 +2925,18 @@ function renderNodeBody(node) {
       `).join("")
       : `<span class="indicator">参考图 ○</span>`;
     const model = normalizeModelValue("image", node.data.model) || getDefaultModel("image");
-    const paramRows = isMjImageModel(model)
+    const klingTool = window.KlingProvider?.toolFor("image", refSlots.length > 0) || "";
+    const klingParamRows = renderKlingDynamicParams(node, "image");
+    const paramRows = klingParamRows || (isMjImageModel(model)
       ? `
       <div class="node-row"><span>比例</span><select data-field="mjAr">${options(mjAspectOptions, node.data.mjAr || "1:1")}</select></div>
       <div class="node-row"><span>版本</span><select data-field="mjVersion">${options(mjVersionsFor(model), getMjVersion(model, node.data.mjVersion))}</select></div>
       <div class="node-row"><span>速度</span><select data-field="mjSpeed">${options(mjSpeedOptions, node.data.mjSpeed || "fast")}</select></div>`
       : `
       <div class="node-row"><span>画质</span><select data-field="quality">${options(["标准画质", "高清画质", "4K"], node.data.quality)}</select></div>
-      <div class="node-row"><span>尺寸</span><select data-field="size">${optionPairs(imageSizeOptions(model), getImageSizeValue(model, node.data.size))}</select></div>`;
+      <div class="node-row"><span>尺寸</span><select data-field="size">${optionPairs(imageSizeOptions(model), getImageSizeValue(model, node.data.size))}</select></div>`);
     return `
-      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", node.data.providerId, node.data.model)}</select></div>
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", node.data.providerId, node.data.model, klingTool)}</select></div>
       ${paramRows}
       <div class="node-indicators">
         <span class="indicator ${prompts ? "ready" : ""}">提示词 ${prompts || "○"}</span>
@@ -2650,6 +2946,23 @@ function renderNodeBody(node) {
         <button class="node-button" data-node-action="generate-image">生成图片</button>
         <button class="node-secondary-button" data-node-action="replace-image">重新生成</button>
       </div>
+    `;
+  }
+
+  if (node.type === "faceSwapConfig") {
+    const slots = getImageReferenceSlots(node.id);
+    const baseConnected = slots.length >= 1;
+    const faceConnected = slots.length >= 2;
+    const ready = baseConnected && faceConnected;
+    return `
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", node.data.providerId, node.data.model, "image_to_image")}</select></div>
+      <div class="node-row"><span>额外要求</span><input type="text" data-field="extra" placeholder="可留空。例：让表情更自然微笑" value="${escapeHtml(node.data.extra || "")}"></div>
+      <div class="node-indicators faceswap-slots">
+        <span class="indicator ${baseConnected ? "ready" : ""}">①底图 ${baseConnected ? "✓" : "○"}</span>
+        <span class="indicator ${faceConnected ? "ready" : ""}">②脸源 ${faceConnected ? "✓" : "○"}</span>
+      </div>
+      <div class="node-tip">第1张连入=底图（保留构图/光影），第2张=脸源（取这张的脸）</div>
+      <button class="node-button" data-node-action="generate-faceswap" ${ready ? "" : "disabled"}>换脸</button>
     `;
   }
 
@@ -2703,7 +3016,7 @@ function renderNodeBody(node) {
   }
 
   if (node.type === "videoConfig") {
-    const prompt = incomingNodes(node.id, ["text", "llmConfig", "promptOptimizer"]).length;
+    const prompt = incomingNodes(node.id, ["text", "llmConfig", "storyboardAssistant", "promptOptimizer"]).length;
     const imageSlots = getImageReferenceSlots(node.id);
     const refSlots = getReferenceMaterialSlots(node.id);
     const mode = getVideoMode(node.data);
@@ -2725,12 +3038,16 @@ function renderNodeBody(node) {
     const modeTip = mode === "first_last"
       ? "图1=首帧，图2=尾帧，提示词描述中间过渡"
       : "提示词里用 @图片N / @视频N 指定每张素材的用途";
-    return `
-      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("video", node.data.providerId, node.data.model)}</select></div>
+    const klingTool = window.KlingProvider?.toolFor("video", imageSlots.length > 0) || "";
+    const klingParams = renderKlingDynamicParams(node, "video");
+    const legacyParams = `
       <div class="node-row"><span>模式</span>${modeSelect}</div>
       <div class="node-row"><span>比例</span><select data-field="ratio">${options(videoAspectOptions, ratioValue)}</select></div>
       <div class="node-row"><span>时长</span><input type="range" class="node-range" data-field="seconds" min="${videoSecondsMin}" max="${videoSecondsMax}" step="1" value="${seconds}"><b data-range-label="seconds">${seconds}s</b></div>
-      <div class="node-tip">${modeTip}</div>
+      <div class="node-tip">${modeTip}</div>`;
+    return `
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("video", node.data.providerId, node.data.model, klingTool)}</select></div>
+      ${klingParams || legacyParams}
       <div class="node-indicators">
         <span class="indicator ${prompt ? "ready" : ""}">提示词 ${prompt ? "✓" : "○"}</span>
         ${refIndicators}
@@ -2787,7 +3104,7 @@ function renderNodeBody(node) {
       </details>
       <div class="storyboard-section">
         <div class="storyboard-section-title">下游</div>
-        <div class="node-row"><span>图模型</span><select data-field="model">${modelOptionsForNode("image", d.providerId, d.model)}</select></div>
+        <div class="node-row"><span>图模型</span><select data-field="model">${modelOptionsForNode("image", d.providerId, d.model, "text_to_image")}</select></div>
         <div class="node-row"><span>尺寸</span><select data-field="size">${optionPairs(imageSizeOptions(d.model), getImageSizeValue(d.model, d.size))}</select></div>
       </div>
       <button class="node-button" data-node-action="generate-storyboard">生成故事板</button>
@@ -2825,7 +3142,7 @@ function renderNodeBody(node) {
       ${optRows}
       <div class="node-indicators">${refHint}</div>
       <div class="storyboard-section">
-        <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", d.providerId, d.model)}</select></div>
+        <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", d.providerId, d.model, hasRef ? "image_to_image" : "text_to_image")}</select></div>
         <div class="node-row"><span>尺寸</span><select data-field="size">${optionPairs(imageSizeOptions(model), getImageSizeValue(model, d.size))}</select></div>
       </div>
       <div class="node-split">
@@ -2854,8 +3171,12 @@ function renderNodeBody(node) {
     }
     const split = clamp(Number(node.data.split ?? 50), 0, 100);
     const imgTag = (src) => `<img class="generated-image compare-img" data-asset-url="${escapeHtml(src)}" src="${escapeHtml(imageDisplaySource(src) || transparentPixel)}" alt="" loading="lazy" referrerpolicy="no-referrer" draggable="false">`;
+    // 舞台比例跟随 A 图（第一张连入的图）的自然比例——已知时直接定死 aspect-ratio，
+    // 让横屏输入得到横屏对比框；未知时回落到 CSS 的方形 min-height，加载后由 setupCompareStages 补上。
+    const cw = Number(node.data._imgW) || 0, ch = Number(node.data._imgH) || 0;
+    const stageStyle = cw > 2 && ch > 2 ? ` style="aspect-ratio:${cw} / ${ch}; min-height:0"` : "";
     return `
-      <div class="compare-stage">
+      <div class="compare-stage"${stageStyle}>
         ${imgTag(bSrc)}
         <div class="compare-clip" style="clip-path: inset(0 ${100 - split}% 0 0)">
           ${imgTag(aSrc)}
@@ -2892,7 +3213,7 @@ function renderNodeBody(node) {
       </div>
       <div class="node-row"><span>锁原始比例</span><input type="checkbox" data-field="lockRatio" ${d.lockRatio ? "checked" : ""}></div>
       <div class="node-row"><span>填充提示</span><input type="text" data-field="prompt" placeholder="可留空。例：自然延展海边风景" value="${escapeHtml(d.prompt || "")}"></div>
-      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", d.providerId, d.model)}</select></div>
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", d.providerId, d.model, "image_to_image")}</select></div>
       <div class="node-row"><span>目标尺寸</span><span class="expand-size">${escapeHtml(computeExpandTargetLabel(node))}</span></div>
       <button class="node-button" data-node-action="generate-expand">生成扩展</button>
     `;
@@ -3112,12 +3433,7 @@ async function persistVideoBlob(blob) {
 }
 
 function ratioFromDimensions(width, height) {
-  const w = Math.round(width);
-  const h = Math.round(height);
-  if (!(w > 0) || !(h > 0)) return "";
-  const gcd = (a, b) => (b ? gcd(b, a % b) : a);
-  const g = gcd(w, h);
-  return `${w / g}:${h / g}`;
+  return window.KlingProvider?.videoMetadataRatio({ source: "metadata", width, height, currentRatio: "" }) || "";
 }
 
 function probeVideoRatio(src) {
@@ -3603,7 +3919,7 @@ async function openModel3dEditor(nodeId) {
         st.maskAlpha = maskAlpha;
         st.showGrid = showGrid;
         updateNode(nodeId, { url: sentinel, view: st, renderMode: st.renderMode });
-        showToast("已截取当前比例画面，可连线到文生图节点作参考");
+        showToast("已截取当前比例画面，可连线到图片生成节点作参考");
         cleanup();
       } catch (error) {
         showToast(`截取失败：${error.message}`);
@@ -3621,7 +3937,7 @@ async function openModel3dEditor(nodeId) {
       selectedRatio = ratioSelect.value;
       updateMask();
       const n = applyAspectToImageConfigs(nodeId, ratioNumOf(selectedRatio));
-      if (n) showToast(`已把比例 ${selectedRatio} 同步到 ${n} 个文生图节点`);
+      if (n) showToast(`已把比例 ${selectedRatio} 同步到 ${n} 个图片生成节点`);
     });
     const maskAlphaInput = overlay.querySelector('[data-m3d="maskalpha"]');
     maskAlphaInput.addEventListener("input", () => { maskAlpha = Number(maskAlphaInput.value) / 100; updateMask(); });
@@ -3782,7 +4098,7 @@ function getTextMentionOptions(textNodeId) {
       return slots.map((ref) => ({
         ...ref,
         configId: config.id,
-        configLabel: config.data.label || (config.type === "videoConfig" ? "视频生成" : "文生图"),
+        configLabel: config.data.label || (config.type === "videoConfig" ? "视频生成" : "图片生成"),
       }));
     });
   const seen = new Set();
@@ -3888,15 +4204,17 @@ function addNode(type, position = getViewportCenter(), data = {}) {
   const defaults = {
     text: { label: "文本节点", content: "" },
     llmConfig: { label: "LLM 文本生成", model: getDefaultModel("chat") },
+    storyboardAssistant: { label: "分镜助手", model: getDefaultModel("chat"), requirements: "", output: "" },
     promptOptimizer: {
       label: "提示词优化",
       model: getDefaultModel("chat"),
       fields: { subject: "", structure: "", material: "", lighting: "", style: "", composition: "" },
     },
-    imageConfig: { label: "文生图", model: getDefaultModel("image"), quality: "标准画质", size: getImageSizeValue(getDefaultModel("image"), "2048x2048") },
+    imageConfig: { label: "图片生成", model: getDefaultModel("image"), quality: "标准画质", size: getImageSizeValue(getDefaultModel("image"), "2048x2048") },
     image: { label: "图片节点", url: false },
     imageCompare: { label: "图片对比", split: 50 },
     imageExpand: { label: "图片扩展", padL: 0, padR: 0, padT: 0, padB: 0, lockRatio: false, prompt: "", model: "gpt-image-2" },
+    faceSwapConfig: { label: "换脸", model: getDefaultModel("image"), size: getImageSizeValue(getDefaultModel("image"), "2048x2048"), quality: "高清画质", extra: "" },
     model3dPreview: { label: "3D 模型预览", url: false, modelAssetId: "", modelName: "", modelFormat: "", renderMode: "clay", view: null },
     videoConfig: { label: "视频生成", model: getDefaultModel("video"), videoMode: "reference", ratio: "16:9", seconds: 8 },
     video: { label: "视频节点", url: false },
@@ -3942,6 +4260,7 @@ function addNode(type, position = getViewportCenter(), data = {}) {
     position: { x: position.x, y: position.y },
     data: { ...defaults[type], ...data },
   };
+  ensureNodeProvider(node);
   state.nodes = [...state.nodes, node];
   setSelectedNodes([node.id]);
   nodeMenu.hidden = true;
@@ -4039,7 +4358,8 @@ function hasApiKey(kind = "chat", providerId = "") {
   const group = backendConfig.providers?.[kind];
   if (!group) return false;
   const pid = providerId && group.items[providerId] ? providerId : group.default;
-  return Boolean(group.items?.[pid]?.configured);
+  const provider = group.items?.[pid];
+  return window.KlingProvider?.isCallableProvider(provider) ?? Boolean(provider?.configured);
 }
 
 async function apiFetch(path, options = {}) {
@@ -4237,7 +4557,7 @@ function normalizeImageSize(size) {
 }
 
 function getNodePrompt(targetId) {
-  return incomingNodes(targetId, ["text", "llmConfig", "promptOptimizer"])
+  return incomingNodes(targetId, ["text", "llmConfig", "storyboardAssistant", "promptOptimizer"])
     .map((node) => {
       if (node.type === "promptOptimizer") return composeOptimizerPrompt(node.data.fields);
       return node.data.output || node.data.content || "";
@@ -4360,6 +4680,19 @@ async function polishWithApi(text, model = getDefaultModel("chat"), providerId =
   return data?.text || text;
 }
 
+async function storyboardAssistantWithApi(text, requirements = "", model = getDefaultModel("chat"), providerId = "") {
+  const data = await apiFetch("/api/chat/storyboard-assistant", {
+    method: "POST",
+    body: JSON.stringify({
+      providerId,
+      model: normalizeModelValue("chat", model) || getDefaultModel("chat"),
+      text,
+      requirements,
+    }),
+  });
+  return data?.text || "";
+}
+
 async function requestImageGeneration(configNode, prompt, refImages = []) {
   const body = buildImageGenerationBody(configNode, prompt, refImages);
 
@@ -4367,6 +4700,12 @@ async function requestImageGeneration(configNode, prompt, refImages = []) {
     method: "POST",
     body: JSON.stringify(body),
   });
+  if (data?.adapter === "kling-cli" && data?.id) {
+    const result = await pollKlingTask(data.id, "图片");
+    const source = result?.urls?.[0] || result?.video_url || "";
+    if (!source) throw new Error("可灵图片任务完成但未返回图片地址");
+    return persistImageSource(source);
+  }
   const source = extractImageSource(data);
   if (!source) throw new Error("图像接口未返回可显示的图片地址或 base64 数据");
   return persistImageSource(source);
@@ -4376,6 +4715,17 @@ function buildImageGenerationBody(configNode, prompt, refImages = []) {
   const model = normalizeModelValue("image", configNode.data.model) || getDefaultModel("image");
   const providerId = configNode.data.providerId || "";
   const size = getImageSizeValue(model, configNode.data.size);
+  const klingParams = getKlingRequestParams(configNode, "image", refImages.length);
+
+  if (klingParams) {
+    return {
+      providerId,
+      model,
+      prompt,
+      dynamicParams: klingParams,
+      ...(refImages.length ? { image: refImages } : {}),
+    };
+  }
 
   if (isStandardImageModel(model)) {
     const quality = mapImageQuality(configNode.data.quality);
@@ -4471,12 +4821,14 @@ function normalizeImageSource(value, hint = "") {
 async function requestVideoCreate(configNode, prompt, images = [], videos = []) {
   const model = normalizeModelValue("video", configNode.data.model) || getDefaultModel("video");
   const providerId = configNode.data.providerId || "";
+  const klingParams = getKlingRequestParams(configNode, "video", images.length);
   return apiFetch("/api/video/create", {
     method: "POST",
     body: JSON.stringify({
       providerId,
       model,
       prompt,
+      ...(klingParams ? { dynamicParams: klingParams } : {}),
       videoMode: getVideoMode(configNode.data),
       ratio: getVideoRatioValue(configNode.data),
       seconds: clamp(Number(configNode.data.seconds) || 8, videoSecondsMin, videoSecondsMax),
@@ -4487,8 +4839,24 @@ async function requestVideoCreate(configNode, prompt, images = [], videos = []) 
 }
 
 async function requestVideoQuery(taskId, providerId = "") {
+  if (providerId === "kling-cli") {
+    return apiFetch(`/api/kling/tasks/${encodeURIComponent(taskId)}`, { method: "GET" });
+  }
   const qp = providerId ? `&providerId=${encodeURIComponent(providerId)}` : "";
   return apiFetch(`/api/video/query?id=${encodeURIComponent(taskId)}${qp}`, { method: "GET" });
+}
+
+async function pollKlingTask(taskId, label = "任务") {
+  for (let attempt = 0; attempt < 180; attempt += 1) {
+    processingText.textContent = `可灵${label}生成中... ${attempt + 1}/180`;
+    const result = await apiFetch(`/api/kling/tasks/${encodeURIComponent(taskId)}`, { method: "GET" });
+    if (String(result?.status || "").toLowerCase() === "succeeded") return result;
+    if (String(result?.status || "").toLowerCase() === "failed") {
+      throw new Error(result?.error || "可灵任务失败");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+  throw new Error(`可灵${label}任务仍在生成中，可稍后使用任务 ID ${taskId} 继续查询`);
 }
 
 function generateGradient(seed = "") {
@@ -4575,6 +4943,96 @@ async function generateImage(configId) {
     updateNode(imageId, { loading: false, url: false, error: friendly });
     processing.hidden = true;
     showToast(`图片生成失败：${error.message}`);
+  }
+}
+
+// 换脸提示词：强制模型在底图统一光照下"重生成"脸，而不是抠图粘贴。图片1=底图，图片2=脸源。
+const FACE_SWAP_PROMPT = `这是一次"换脸"任务，给你两张参考图：
+- 图片1 是底图：必须完整保留它的发型、头部角度、姿态、身体、服装、背景、构图与整体光照。
+- 图片2 是脸源：只取这张图中人物的面部身份特征——五官形状、脸型、神态。
+
+要求：
+1. 把图片2人物的面容自然地重新生成到图片1人物的头部上，替换其面部，让来自图片2的人物身份清晰可辨。
+2. 这不是抠图粘贴：要在图片1的统一光照下重新渲染这张脸，使肤色、光线方向、色温、明暗过渡、阴影、噪点颗粒、清晰度都与图片1完全一致，边缘无缝融合。
+3. 除面部以外，图片1的一切都不要改变。
+4. 输出与图片1相同的画面和比例，只是人物换了脸，整体真实和谐，看不出后期痕迹。`;
+
+// 探测图片自然宽高比（用于让换脸输出跟随底图比例，避免裁切/拉伸）。
+function probeImageAspect(source) {
+  return new Promise((resolve) => {
+    (async () => {
+      try {
+        const display = await getDisplayImageUrl(source);
+        if (!display) return resolve(0);
+        const img = new Image();
+        img.onload = () => resolve(img.naturalWidth && img.naturalHeight ? img.naturalWidth / img.naturalHeight : 0);
+        img.onerror = () => resolve(0);
+        img.src = display;
+      } catch {
+        resolve(0);
+      }
+    })();
+  });
+}
+
+async function generateFaceSwap(configId) {
+  const config = getNode(configId);
+  if (!config) return;
+  const model = normalizeModelValue("image", config.data.model) || getDefaultModel("image");
+  if (isMjImageModel(model)) {
+    showToast("换脸请用 Gemini / gpt-image 这类编辑模型，Midjourney 不支持多图换脸");
+    return;
+  }
+  const slots = getImageReferenceSlots(configId);
+  if (slots.length < 2) {
+    showToast("需连接两张图片：第1张=底图，第2张=脸源");
+    return;
+  }
+  const baseNode = slots[0].node; // 底图（保留）
+  const faceNode = slots[1].node; // 脸源（取脸）
+  const extra = String(config.data.extra || "").trim();
+  const prompt = FACE_SWAP_PROMPT + (extra ? `\n\n额外要求：${extra}` : "");
+
+  const existing = findOutputImageNode(configId);
+  let imageId = existing?.id || null;
+  if (!imageId) {
+    imageId = addNode("image", { x: config.position.x + 390, y: config.position.y }, { label: "换脸结果", loading: true, model });
+    addEdge(configId, imageId, "output", { label: "输出" });
+  } else {
+    updateNode(imageId, { loading: true, url: false, error: "" });
+  }
+
+  const imgConfigured = hasApiKey("image", config.data.providerId);
+  showProcessing(imgConfigured ? "正在换脸..." : "未配置图像 API Key，使用本地模拟生成...");
+
+  if (!imgConfigured) {
+    setTimeout(() => {
+      updateNode(imageId, { loading: false, url: true, model, gradient: generateGradient("faceswap"), error: "" });
+      updateNode(configId, { executed: true });
+      hideProcessing("换脸完成（模拟）");
+    }, 850);
+    return;
+  }
+
+  try {
+    // 底图在前、脸源在后，与提示词里的"图片1/图片2"一一对应。
+    const refImages = (await Promise.all([baseNode, faceNode].map((n) => resolveImageForApi(n.data.url)))).filter(Boolean);
+    if (refImages.length < 2) throw new Error("参考图读取失败，请确认两张图片都已就绪");
+    // 输出尺寸跟随底图比例，保持构图和谐不裁切。
+    const ar = await probeImageAspect(baseNode.data.url);
+    const sizeChoices = imageSizeOptions(model).map((pair) => pair[0]);
+    const size = ar ? nearestByAspect(sizeChoices, ar) : getImageSizeValue(model, config.data.size);
+    const cfg = { ...config, data: { ...config.data, model, size } };
+    const url = await requestImageGeneration(cfg, prompt, refImages);
+    updateNode(imageId, { loading: false, url, model, gradient: generateGradient("faceswap"), error: "" });
+    updateNode(configId, { executed: true });
+    hideProcessing("换脸完成");
+    void recordProjectHistory({ type: "image", url, prompt: "[换脸]", model });
+  } catch (error) {
+    const friendly = friendlyImageError(error.message);
+    updateNode(imageId, { loading: false, url: false, error: friendly });
+    processing.hidden = true;
+    showToast(`换脸失败：${error.message}`);
   }
 }
 
@@ -4911,22 +5369,37 @@ function inferConnection(sourceId, targetId) {
   if (source?.type === "imageExpand" && target?.type === "image") return { type: "output", label: "输出" };
   if (target?.type === "imageExpand" && source?.type === "image") return { type: "imageOrder", label: "原图" };
   if (target?.type === "promptOptimizer" && source?.type === "text") return { type: "promptOrder", label: "原始创意" };
-  if (target?.type === "imageConfig" && ["text", "llmConfig", "promptOptimizer"].includes(source?.type)) return { type: "promptOrder", label: "提示词" };
+  if (target?.type === "storyboardAssistant" && ["text", "llmConfig", "promptOptimizer"].includes(source?.type)) return { type: "promptOrder", label: "故事/概念" };
+  if (target?.type === "imageConfig" && ["text", "llmConfig", "storyboardAssistant", "promptOptimizer"].includes(source?.type)) return { type: "promptOrder", label: "提示词" };
   if (target?.type === "imageConfig" && source?.type === "image") return { type: "imageOrder", label: "参考图" };
-  if (target?.type === "videoConfig" && ["text", "llmConfig", "promptOptimizer"].includes(source?.type)) return { type: "promptOrder", label: "提示词" };
+  if (source?.type === "faceSwapConfig" && target?.type === "image") return { type: "output", label: "输出" };
+  if (target?.type === "faceSwapConfig" && source?.type === "image") {
+    // 连线先后决定角色：第1张=底图，第2张=脸源。
+    const existing = state.edges.filter((e) => e.target === targetId && getNode(e.source)?.type === "image").length;
+    const label = existing === 0 ? "底图" : existing === 1 ? "脸源" : `参考图${existing + 1}`;
+    return { type: "imageOrder", label };
+  }
+  if (target?.type === "videoConfig" && ["text", "llmConfig", "storyboardAssistant", "promptOptimizer"].includes(source?.type)) return { type: "promptOrder", label: "提示词" };
   if (target?.type === "videoConfig" && source?.type === "image") return { type: "imageRole", label: "首帧" };
   return { type: "default", label: "连接" };
 }
 
 const connectionDropTargets = {
   text: [
+    { type: "storyboardAssistant", label: "+ 分镜助手" },
     { type: "promptOptimizer", label: "+ 提示词优化" },
-    { type: "imageConfig", label: "+ 文生图" },
+    { type: "imageConfig", label: "+ 图片生成" },
     { type: "videoConfig", label: "+ 文生视频" },
     { type: "storyboardConfig", label: "+ 故事板生成" },
   ],
   llmConfig: [
-    { type: "imageConfig", label: "+ 文生图" },
+    { type: "storyboardAssistant", label: "+ 分镜助手" },
+    { type: "imageConfig", label: "+ 图片生成" },
+    { type: "videoConfig", label: "+ 文生视频" },
+    { type: "storyboardConfig", label: "+ 故事板生成" },
+  ],
+  storyboardAssistant: [
+    { type: "imageConfig", label: "+ 图片生成" },
     { type: "videoConfig", label: "+ 文生视频" },
     { type: "storyboardConfig", label: "+ 故事板生成" },
   ],
@@ -4934,12 +5407,13 @@ const connectionDropTargets = {
     { type: "image", label: "+ 图像结果" },
   ],
   promptOptimizer: [
-    { type: "imageConfig", label: "+ 文生图" },
+    { type: "imageConfig", label: "+ 图片生成" },
     { type: "videoConfig", label: "+ 文生视频" },
   ],
   image: [
-    { type: "imageConfig", label: "+ 文生图(用作参考图)" },
+    { type: "imageConfig", label: "+ 图片生成(用作参考图)" },
     { type: "templateImageConfig", label: "+ 营销物料(用作产品图)" },
+    { type: "faceSwapConfig", label: "+ 换脸" },
     { type: "imageCompare", label: "+ 图片对比" },
     { type: "imageExpand", label: "+ 图片扩展" },
     { type: "videoConfig", label: "+ 文生视频(用作首帧)" },
@@ -4949,6 +5423,9 @@ const connectionDropTargets = {
   ],
   imageConfig: [
     { type: "image", label: "+ 图像结果" },
+  ],
+  faceSwapConfig: [
+    { type: "image", label: "+ 换脸结果" },
   ],
   videoConfig: [
     { type: "video", label: "+ 视频结果" },
@@ -5024,6 +5501,10 @@ async function refreshNode(id) {
     await runLlmNode(id);
     return;
   }
+  if (node.type === "storyboardAssistant") {
+    await runStoryboardAssistantNode(id);
+    return;
+  }
   if (node.type === "promptOptimizer") {
     await runPromptOptimizerNode(id);
     return;
@@ -5038,6 +5519,10 @@ async function refreshNode(id) {
   }
   if (node.type === "imageExpand") {
     generateImageExpand(id);
+    return;
+  }
+  if (node.type === "faceSwapConfig") {
+    generateFaceSwap(id);
     return;
   }
   if (node.type === "videoConfig") {
@@ -5076,6 +5561,34 @@ async function runLlmNode(id) {
   } catch (error) {
     processing.hidden = true;
     showToast(`文本生成失败：${error.message}`);
+  }
+}
+
+function getStoryboardAssistantSource(id) {
+  return incomingNodes(id, ["text", "llmConfig", "promptOptimizer"])
+    .map((node) => {
+      if (node.type === "promptOptimizer") return composeOptimizerPrompt(node.data.fields);
+      return node.data.output || node.data.content || "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+async function runStoryboardAssistantNode(id) {
+  const node = getNode(id);
+  if (!node) return;
+  const source = getStoryboardAssistantSource(id);
+  const requirements = node.data.requirements || "";
+  showProcessing(hasApiKey("chat", node.data.providerId) ? "正在调用分镜助手..." : "未配置文本 API Key，使用本地分镜模板...");
+  try {
+    const output = hasApiKey("chat", node.data.providerId)
+      ? await storyboardAssistantWithApi(source, requirements, node.data.model, node.data.providerId)
+      : localStoryboardAssistant(source, requirements);
+    updateNode(id, { output });
+    hideProcessing("分镜方案已生成");
+  } catch (error) {
+    processing.hidden = true;
+    showToast(`分镜助手失败：${error.message}`);
   }
 }
 
@@ -5160,7 +5673,16 @@ function updateConnectionPreview(clientX, clientY) {
 async function generateVideo(configId) {
   const config = getNode(configId);
   if (!config) return;
-  const ratio = getVideoRatioValue(config.data);
+  let ratio = getVideoRatioValue(config.data);
+  const klingContext = klingContextForNode(config, "video");
+  if (klingContext && window.KlingProvider?.videoRatioForSpec) {
+    const firstImage = getImageReferenceSlots(configId)[0]?.node;
+    const imageAspect = firstImage?.data?.url ? await probeImageAspect(firstImage.data.url) : 0;
+    const inputRatio = imageAspect
+      ? nearestByAspect(videoAspectOptions.filter((value) => value !== "adaptive"), imageAspect)
+      : "";
+    ratio = window.KlingProvider.videoRatioForSpec(klingContext.spec, klingStoredParams(config), inputRatio, ratio);
+  }
   // 已连了视频结果节点就复用，不再新建
   const existing = findOutputVideoNode(configId);
   let videoId = existing?.id;
@@ -5208,16 +5730,19 @@ async function generateVideo(configId) {
 }
 
 async function pollVideoTask(videoId, taskId, providerId = "") {
-  for (let attempt = 0; attempt < 24; attempt += 1) {
-    processingText.textContent = `视频生成中，正在查询任务... ${attempt + 1}/24`;
+  const maxAttempts = providerId === "kling-cli" ? 180 : 24;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    processingText.textContent = `视频生成中，正在查询任务... ${attempt + 1}/${maxAttempts}`;
     const result = await requestVideoQuery(taskId, providerId);
     if (result?.video_url) {
       updateNode(videoId, { label: "视频生成结果", loading: false, url: result.video_url, taskId, gradient: generateGradient(taskId) });
       const videoNode = getNode(videoId);
-      void recordProjectHistory({ type: "video", url: result.video_url, prompt: "", model: videoNode?.data?.model || "" });
+      const saved = await recordProjectHistory({ type: "video", url: result.video_url, prompt: "", model: videoNode?.data?.model || "" });
+      // 上游视频链接会过期；落盘成功后切到持久的本地回流地址，刷新画布后仍可播放。
+      if (saved?.fileUrl && getNode(videoId)) updateNode(videoId, { url: saved.fileUrl });
       return;
     }
-    if (["failed", "error", "canceled"].includes(String(result?.status || "").toLowerCase())) {
+    if (["failed", "error", "canceled", "cancelled"].includes(String(result?.status || "").toLowerCase())) {
       throw new Error(result?.error || `任务状态：${result.status}`);
     }
     await new Promise((resolve) => setTimeout(resolve, 5000));
@@ -5248,6 +5773,71 @@ function createImageToVideo(imageId) {
 
 function polishText(text) {
   return `${text}，高质量细节，清晰主体，统一风格，电影级光影，构图完整，适合 AI 图像/视频生成。`;
+}
+
+function localStoryboardAssistant(text, requirements = "") {
+  const subject = String(text || "").trim() || "一个需要影视化呈现的场景";
+  const extra = String(requirements || "").trim();
+  return `关键假设：${subject}${extra ? `；补充要求：${extra}` : ""}。
+
+场景目标：
+- 这场戏用于交代核心人物/事件，并通过镜头递进建立情绪。
+- 观众需要接收到：人物处境、环境关系、关键动作和情绪变化。
+- 情绪从建立氛围 → 信息推进 → 关键反应 → 收束到下一动作。
+
+镜头结构思路：
+- 先用环境镜头建立空间和时间。
+- 再用中景/全景明确人物位置与动作关系。
+- 用近景/特写推动情绪和信息重点。
+- 最后用反应镜头或细节镜头作为剪辑连接点。
+
+逐镜分镜：
+1. 远景 / 环境建立
+画面内容：展示主要场景、时间、天气和人物所在空间。
+机位 / 运镜：固定机位或缓慢推进。
+情绪 / 叙事作用：建立氛围与空间关系。
+时长建议：3-4 秒。
+AI生成建议：优先生成静帧，统一角色外观、服装、光线和场景材质。
+
+2. 全景 / 人物进入关系
+画面内容：人物进入画面或处在核心动作开始前的位置。
+机位 / 运镜：平视或轻微低角度，保持空间连续。
+情绪 / 叙事作用：明确角色与环境的关系。
+时长建议：3 秒。
+AI生成建议：约束人物服装、姿态、道具，不要更换场景。
+
+3. 中景 / 事件推进
+画面内容：人物执行关键动作，画面中保留可识别环境线索。
+机位 / 运镜：跟拍、轻推或横移。
+情绪 / 叙事作用：推动剧情进入主要事件。
+时长建议：4-5 秒。
+AI生成建议：适合视频生成，动作描述要具体且单一。
+
+4. 近景 / 情绪反应
+画面内容：人物表情、视线或手部细节变化。
+机位 / 运镜：稳定近景，浅景深。
+情绪 / 叙事作用：让观众理解人物心理。
+时长建议：2-3 秒。
+AI生成建议：作为关键画面先生成静帧，重点锁定脸、服装、光线。
+
+5. 特写 / 信息重点
+画面内容：关键道具、动作细节或视线落点。
+机位 / 运镜：特写，轻微推近。
+情绪 / 叙事作用：强化转折或信息提示。
+时长建议：2 秒。
+AI生成建议：拆成独立镜头，避免同画面里同时塞入过多动作。
+
+6. 中远景 / 收束与转场
+画面内容：人物完成动作，空间关系重新展开，为下一场留下方向。
+机位 / 运镜：缓慢拉远或切空镜。
+情绪 / 叙事作用：收束本场，形成转场余韵。
+时长建议：3-4 秒。
+AI生成建议：可作为补镜或转场镜头，保持色调和材质一致。
+
+关键画面优先级：
+- 镜头1：建立场景视觉锚点。
+- 镜头4：锁定角色脸和情绪。
+- 镜头5：锁定剧情信息点。`;
 }
 
 function getViewportCenter() {
@@ -5418,9 +6008,11 @@ function renderContextMenu() {
 
   items.push({ action: "add-text", label: "文本节点" });
   items.push({ action: "add-llm", label: "LLM 文本生成" });
-  items.push({ action: "add-image-config", label: "文生图配置" });
+  items.push({ action: "add-storyboard-assistant", label: "分镜助手" });
+  items.push({ action: "add-image-config", label: "图片生成" });
   items.push({ action: "add-storyboard-config", label: "故事板生成" });
   items.push({ action: "add-template-image-config", label: "营销物料" });
+  items.push({ action: "add-face-swap-config", label: "换脸" });
   items.push({ action: "add-video-config", label: "视频生成配置" });
   items.push({ action: "add-image", label: "图片节点" });
   items.push({ action: "add-image-compare", label: "图片对比" });
@@ -5469,11 +6061,13 @@ function handleContextAction(action) {
   const typeByAction = {
     "add-text": "text",
     "add-llm": "llmConfig",
+    "add-storyboard-assistant": "storyboardAssistant",
     "add-prompt-optimizer": "promptOptimizer",
     "add-image-config": "imageConfig",
     "add-video-config": "videoConfig",
     "add-storyboard-config": "storyboardConfig",
     "add-template-image-config": "templateImageConfig",
+    "add-face-swap-config": "faceSwapConfig",
     "add-image-compare": "imageCompare",
     "add-image-expand": "imageExpand",
     "add-image": "image",
@@ -5719,6 +6313,29 @@ function setupExpandStages() {
     };
     if (img.complete && img.naturalWidth > 2) onReady();
     img.addEventListener("load", onReady);
+  });
+}
+
+// 图片对比：每次渲染后读出 A 图自然尺寸，按其比例定死舞台 aspect-ratio（横屏输入 → 横屏对比框）
+function setupCompareStages() {
+  document.querySelectorAll('.node[data-type="imageCompare"] .compare-stage').forEach((stage) => {
+    const node = getNode(stage.closest(".node")?.dataset.id);
+    if (!node) return;
+    // A 图在 .compare-clip 里（B 是裸 .compare-img），取 A 作基准比例
+    const aImg = stage.querySelector(".compare-clip .compare-img");
+    if (!aImg) return;
+    const onReady = () => {
+      const w = aImg.naturalWidth, h = aImg.naturalHeight;
+      if (w > 2 && h > 2 && (node.data._imgW !== w || node.data._imgH !== h)) {
+        node.data._imgW = w;
+        node.data._imgH = h;
+        // 直接改样式，避免整页重渲染导致图片闪烁（参照 applyCompareSplit 的做法）
+        stage.style.aspectRatio = `${w} / ${h}`;
+        stage.style.minHeight = "0";
+      }
+    };
+    if (aImg.complete && aImg.naturalWidth > 2) onReady();
+    aImg.addEventListener("load", onReady);
   });
 }
 
@@ -6354,13 +6971,17 @@ document.addEventListener("paste", async (event) => {
   }
 });
 
-// 载入视频节点的预览比例跟随真实视频尺寸；loadedmetadata 不冒泡，用捕获监听兜住旧节点
+// 所有视频结果都以真实媒体尺寸校准预览比例；loadedmetadata 不冒泡，用捕获监听。
 document.addEventListener("loadedmetadata", (event) => {
   const videoEl = event.target;
   if (!(videoEl instanceof HTMLVideoElement) || !videoEl.classList.contains("result-video")) return;
-  if (!isIndexedImageSource(videoEl.dataset.assetUrl || "")) return;
-  const ratio = ratioFromDimensions(videoEl.videoWidth, videoEl.videoHeight);
   const node = getNode(videoEl.closest(".node")?.dataset.id);
+  const ratio = window.KlingProvider?.videoMetadataRatio({
+    source: videoEl.dataset.assetUrl || videoEl.currentSrc || "",
+    width: videoEl.videoWidth,
+    height: videoEl.videoHeight,
+    currentRatio: node?.data?.ratio || "",
+  }) || "";
   if (!ratio || !node || node.type !== "video" || node.data.ratio === ratio) return;
   updateNode(node.id, { ratio });
 }, true);
@@ -6423,6 +7044,7 @@ document.addEventListener("click", async (event) => {
     if (nodeAction === "generate-storyboard") generateStoryboard(id);
     if (nodeAction === "generate-template-image") generateTemplateImage(id);
     if (nodeAction === "generate-expand") generateImageExpand(id);
+    if (nodeAction === "generate-faceswap") generateFaceSwap(id);
     if (nodeAction === "generate-video") generateVideo(id);
     if (nodeAction === "image-to-image") createImageToImage(id);
     if (nodeAction === "image-to-video") createImageToVideo(id);
@@ -6443,6 +7065,9 @@ document.addEventListener("click", async (event) => {
     }
     if (nodeAction === "run-llm") {
       await runLlmNode(id);
+    }
+    if (nodeAction === "run-storyboard-assistant") {
+      await runStoryboardAssistantNode(id);
     }
     if (nodeAction === "run-prompt-optimizer") {
       await runPromptOptimizerNode(id);
@@ -6493,6 +7118,7 @@ document.addEventListener("click", async (event) => {
   if (action === "toggle-node-menu") nodeMenu.hidden = !nodeMenu.hidden;
   if (action === "add-text") addNode("text");
   if (action === "add-llm") addNode("llmConfig");
+  if (action === "add-storyboard-assistant") addNode("storyboardAssistant");
   if (action === "add-prompt-optimizer") addNode("promptOptimizer");
   if (action === "add-image") addNode("image");
   if (action === "add-uploaded-image") {
@@ -6508,6 +7134,7 @@ document.addEventListener("click", async (event) => {
   if (action === "add-video-config") addNode("videoConfig");
   if (action === "add-storyboard-config") addNode("storyboardConfig");
   if (action === "add-template-image-config") addNode("templateImageConfig");
+  if (action === "add-face-swap-config") addNode("faceSwapConfig");
   if (action === "add-image-compare") addNode("imageCompare");
   if (action === "add-image-expand") addNode("imageExpand");
   if (action === "add-model3d") addNode("model3dPreview");
@@ -6559,11 +7186,22 @@ document.addEventListener("error", (event) => {
 }, true);
 
 function syncNodeFieldControl(control) {
-  const field = control?.dataset?.field;
   const nodeEl = control?.closest?.(".node");
-  if (!field || !nodeEl) return false;
+  if (!nodeEl) return false;
   const node = getNode(nodeEl.dataset.id);
   if (!node) return false;
+  const klingParam = control?.dataset?.klingParam;
+  if (klingParam) {
+    if (!node.data.dynamicParams) node.data.dynamicParams = {};
+    if (!node.data.dynamicParams["kling-cli"]) node.data.dynamicParams["kling-cli"] = {};
+    if (!node.data.dynamicParams["kling-cli"][node.data.model]) node.data.dynamicParams["kling-cli"][node.data.model] = {};
+    node.data.dynamicParams["kling-cli"][node.data.model][klingParam] = control.value;
+    if (node.type === "videoConfig" && klingParam === "aspect_ratio") node.data.ratio = control.value;
+    saveState();
+    return true;
+  }
+  const field = control?.dataset?.field;
+  if (!field) return false;
   const value = control.type === "checkbox" ? control.checked : control.value;
   if (field === "model") {
     const parsed = parseModelKey(value);
@@ -6621,6 +7259,7 @@ function syncNodeFieldControl(control) {
 
 function normalizeNodeModelValue(nodeType, value) {
   if (nodeType === "llmConfig") return normalizeModelValue("chat", value);
+  if (nodeType === "storyboardAssistant") return normalizeModelValue("chat", value);
   if (nodeType === "promptOptimizer") return normalizeModelValue("chat", value);
   if (nodeType === "imageConfig") return normalizeModelValue("image", value);
   if (nodeType === "templateImageConfig") return normalizeModelValue("image", value);
@@ -7128,13 +7767,11 @@ async function bootstrap() {
   await refreshAuthUser();
   if (currentAuthUser) {
     authOverlay.hidden = true;
+    await loadBackendStatus();
     await loadStoryboardBlacklist();
     renderTemplateLibrary();
     applyTheme();
     initializeProjectManager();
-    loadBackendStatus().finally(() => {
-      if (!appShell.hidden) render();
-    });
   } else {
     await loadStoryboardBlacklist();
     appShell.hidden = true;

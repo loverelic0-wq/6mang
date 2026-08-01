@@ -168,6 +168,14 @@ function normalizeTask(value, generationId = "") {
   };
 }
 
+function isKlingProvider(provider) {
+  return provider?.adapter === "kling-cli";
+}
+
+function usesCanvasBilling(provider) {
+  return !isKlingProvider(provider);
+}
+
 function createKlingCli(options = {}) {
   const cliScriptPath = findCliScript(options.cliScriptPath);
   const cwd = options.rootDir || path.resolve(__dirname, "..");
@@ -312,7 +320,7 @@ function createKlingCli(options = {}) {
     }
     for (const declaration of spec.arguments) {
       if (declaration.name === "prompt") continue;
-      if (declaration.required && !String(params[declaration.name] ?? "").trim()) {
+      if (declaration.required && declaration.default === undefined && !String(params[declaration.name] ?? "").trim()) {
         const error = new Error(`模型 ${request.model} 缺少必填参数 ${declaration.name}`);
         error.statusCode = 400;
         throw error;
@@ -503,7 +511,9 @@ module.exports = {
   buildGenerationArgs,
   createKlingCli,
   findCliScript,
+  isKlingProvider,
   normalizeCapabilities,
   normalizeTask,
   parseQuietJson,
+  usesCanvasBilling,
 };
