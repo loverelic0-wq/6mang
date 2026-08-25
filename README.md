@@ -88,3 +88,14 @@ quick-start.cmd  # Windows 快速启动脚本
 典型用法：同一类下用多个 key（如图片下挂一个走 OpenAI 系的 key + 一个走 nano banana 的 key），节点上选模型时按子类分组（`<optgroup>`），后端按 `providerId` 路由到对应上游。
 
 保存后写入 `.huobao-settings.json`（gitignored，不会提交）。**API key 永不下发到浏览器**，`/api/status` 只返回脱敏的 `apiKeyMasked` + `configured` 标志。
+
+### 智算谷 CPRT / Seedance 视频渠道
+
+在「API 设置 → 视频模型」点击「+ 新增子类」，填写：
+
+- 显示名：`智算谷 CPRT Seedance`
+- Base URL：`https://ai-api.cprt.xyz/v1`
+- API Key：你的 CPRT Key
+- 模型：例如 `free-video-2.5-multimodal-video`（也可按智算谷当前模型表添加更多模型）
+
+画布会自动识别 `cprt.xyz` 地址，改用 CPRT 的异步创建/查询协议；文本、连接的参考图片与参考视频会被转换为多模态输入。若素材来自本地节点，CPRT 需要其可从公网下载：请在 `.env` 配置 `COS_*`，画布会在提交前上传并使用临时签名 URL。普通远程 HTTPS 素材无需额外处理。

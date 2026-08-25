@@ -8,6 +8,7 @@ loadDotEnv(path.join(rootDir, ".env"));
 
 const db = require("./db");
 const { createKlingCli, isKlingProvider } = require("./kling-cli");
+const { isCprtProvider, buildCprtCreatePayload, normalizeCprtTask } = require("./cprt-provider");
 
 const kling = createKlingCli({ rootDir });
 
@@ -1008,11 +1009,19 @@ async function handleApi(req, res, url) {
     const cost = costFor("video", model);
     db.adjustBalance({ userId: found.user.id, delta: -cost, type: "spend", description: `video ${model}` });
     try {
-      // 参考视频是本地 data URL 时先传 COS 换公网外链（Ark 只认 http 地址）
-      if (isVolcArkProvider(provider) && Array.isArray(body.videos) && body.videos.length) {
+      // Ark 与 CPRT 都只接受公网素材；本地 data URL 先传 COS 换公网外链。
+      if ((isVolcArkProvider(provider) || isCprtProvider(provider)) && Array.isArray(body.videos) && body.videos.length) {
         body.videos = await Promise.all(body.videos.map((v) => ensurePublicMediaUrl(v, "video")));
       }
-      const data = isVolcArkProvider(provider)
+      if (isCprtProvider(provider) && Array.isArray(body.images) && body.images.length) {
+        body.images = await Promise.all(body.images.map((v) => ensurePublicMediaUrl(v, "image")));
+      }
+      const data = isCprtProvider(provider)
+        ? await n1nFetch(provider, "/chat/asyncTask", {
+            method: "POST",
+            body: buildCprtCreatePayload(model, body),
+          })
+        : isVolcArkProvider(provider)
         ? await n1nFetch(provider, "/contents/generations/tasks", {
             method: "POST",
             body: volcVideoCreatePayload(model, body),
@@ -1031,6 +1040,7 @@ async function handleApi(req, res, url) {
         model,
         videoMode: body.videoMode,
         ark: isVolcArkProvider(provider),
+        cprt: isCprtProvider(provider),
         images: Array.isArray(body.images) ? body.images.length : 0,
         videos: vids.length,
         videosAsDataUrl: dataUrlVids,
@@ -1068,6 +1078,9 @@ async function handleApi(req, res, url) {
     let data;
     if (isKlingProvider(provider)) {
       data = await kling.queryTask(id);
+    } else if (isCprtProvider(provider)) {
+      const raw = await n1nFetch(provider, `/chat/asyncTask/${encodeURIComponent(id)}`, { method: "GET" });
+      data = normalizeCprtTask(raw, id);
     } else if (isVolcArkProvider(provider)) {
       const raw = await n1nFetch(provider, `/contents/generations/tasks/${encodeURIComponent(id)}`, { method: "GET" });
       const st = String(raw?.status || "").toLowerCase();
@@ -1266,7 +1279,8 @@ async function ensurePublicMediaUrl(src, kindHint = "video") {
   if (/^https?:\/\//i.test(s)) return s;
   if (!/^data:/i.test(s)) return s;
   if (!cosConfigured()) {
-    throw new Error("本地视频需先上传对象存储，但服务器未配置 COS_*（见 .env.example）");
+    const mediaLabel = kindHint === "video" ? "视频" : "图片";
+    throw new Error(`本地${mediaLabel}需先上传对象存储，但服务器未配置 COS_*（见 .env.example）`);
   }
   const parsed = parseDataUrl(s);
   if (!parsed) throw new Error("无法解析素材 data URL");
