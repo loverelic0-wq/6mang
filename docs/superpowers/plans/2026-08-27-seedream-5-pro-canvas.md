@@ -19,6 +19,7 @@
 - 中文 UI；前端无框架、无模块、无 bundler；后端零新增依赖。
 - 当前 `public/app.js`、`server/server.js` 及若干测试包含用户未提交改动；保留并围绕这些改动编辑。除计划文档外，不提交会混入用户既有内容的文件。
 - 自动测试不得发起真实付费生成。
+- 可测试的 Seedream 纯逻辑放入 `public/seedream-tools.js`（浏览器全局 + CommonJS 双出口）；服务端路由选择放入 `server/image-routing.js`。测试直接调用真实函数，不用源码字符串匹配代替行为测试。
 
 ---
 
@@ -28,6 +29,9 @@
 - Modify: `server/seedream-5-sizes.test.js`
 - Modify: `server/seedream-5-request.test.js`
 - Create: `server/volc-image-request-routing.test.js`
+- Create: `server/image-routing.js`
+- Create: `public/seedream-tools.js`
+- Modify: `public/index.html` to load `seedream-tools.js` before `app.js`
 - Modify: `public/app.js` around `seedream5ImageSizes`, `imageSizeOptions`, `buildImageGenerationBody`
 - Modify: `server/server.js` inside `POST /api/images/generations`
 
@@ -42,8 +46,7 @@
 
 ```js
 test("Seedream 5.0 Pro exposes only documented 1K and 2K presets", () => {
-  const context = loadSizeHelpers();
-  const values = context.imageSizeOptions("doubao-seedream-5-0-pro-260628").map(([value]) => value);
+  const values = tools.imageSizeOptions("doubao-seedream-5-0-pro-260628").map(([value]) => value);
   assert.deepEqual(values, [
     "1024x1024", "1152x864", "864x1152", "1424x800", "800x1424",
     "1248x832", "832x1248", "1568x672", "2048x2048", "2368x1776",
@@ -53,7 +56,7 @@ test("Seedream 5.0 Pro exposes only documented 1K and 2K presets", () => {
 });
 
 test("Seedream 5.0 Lite retains 3K and 4K presets", () => {
-  const values = loadSizeHelpers().imageSizeOptions("doubao-seedream-5-0-260128").map(([value]) => value);
+  const values = tools.imageSizeOptions("doubao-seedream-5-0-260128").map(([value]) => value);
   assert.equal(values.includes("3072x3072"), true);
   assert.equal(values.includes("4096x2304"), true);
 });
@@ -127,24 +130,27 @@ body.optimize_prompt_options = {
 
 - [ ] **Step 7: Add a real routing unit seam and failing test**
 
-Extract from the route:
+Create `server/image-routing.js` with a pure descriptor builder:
 
 ```js
-async function forwardImageGeneration(provider, body) {
+function selectImageUpstreamRequest(provider, body) {
   const model = String(body.model || provider.defaultModel);
   const refs = Array.isArray(body.image) ? body.image.filter(Boolean) : body.image ? [body.image] : [];
   if (isVolcArkProvider(provider)) {
-    if (refs.length > 10) throw statusError(400, "Seedream 5.0 Pro 最多支持 10 张参考图");
-    return n1nFetch(provider, "/images/generations", {
-      method: "POST",
-      body: compactPayload({ ...body, providerId: undefined, model, image: refs.length ? refs : undefined }),
-    });
+    return {
+      mode: "json",
+      route: "/images/generations",
+      refs,
+      payload: compactPayload({ ...body, providerId: undefined, model, image: refs.length ? refs : undefined }),
+    };
   }
-  return refs.length ? forwardOpenAiImageEdit(provider, body, refs) : forwardOpenAiImageCreate(provider, body);
+  return refs.length
+    ? { mode: "multipart", route: "/images/edits", refs, payload: null }
+    : { mode: "json", route: "/images/generations", refs, payload: compactPayload({ ...body, providerId: undefined, model }) };
 }
 ```
 
-The test injects fake `jsonFetch`/`formFetch` dependencies into a pure `selectImageUpstreamRequest(provider, body)` helper and asserts the selected route, encoding, and body without network access.
+The test imports the real function and asserts its route, encoding, references and literal payload without network access.
 
 - [ ] **Step 8: Run the routing test and verify RED**
 
@@ -175,6 +181,7 @@ Expected: tests pass; syntax checks exit 0; no unrelated lines are overwritten.
 
 **Files:**
 - Create: `server/seedream-layer-response.test.js`
+- Modify: `public/seedream-tools.js`
 - Modify: `public/app.js` near `extractImageSource`
 
 **Interfaces:**
@@ -244,7 +251,8 @@ Expected: all pass and the parser has no DOM or network dependencies.
 ### Task 3: Add the precise image-edit node and annotation editor
 
 **Files:**
-- Create: `server/seedream-editor-ui.test.js`
+- Create: `server/seedream-annotation.test.js`
+- Modify: `public/seedream-tools.js`
 - Modify: `public/index.html` node menu
 - Modify: `public/app.js` node sizing/defaults/rendering/actions/connections/generation
 - Modify: `public/styles.css` annotation overlay and node styles
@@ -255,26 +263,30 @@ Expected: all pass and the parser has no DOM or network dependencies.
 - Produces: `renderAnnotatedImage(baseSource, annotation): Promise<string>`
 - Produces: `generateSeedreamEdit(configId): Promise<void>`
 
-- [ ] **Step 1: Write static contract tests for the new node**
+- [ ] **Step 1: Write behavior tests for annotation normalization and hit testing**
 
 ```js
-test("precise edit node is registered across defaults, rendering, actions and connections", () => {
-  for (const token of [
-    'seedreamEdit: { width:',
-    'if (node.type === "seedreamEdit")',
-    'data-node-action="open-seedream-editor"',
-    'function generateSeedreamEdit(',
-    'target?.type === "seedreamEdit"',
-    'addNode("seedreamEdit")',
-  ]) assert.match(appSource, new RegExp(escapeRegExp(token)));
+test("annotation points stay normalized and brush paths are simplified", () => {
+  assert.deepEqual(tools.clampNormalizedPoint({ x: -0.1, y: 1.2 }), { x: 0, y: 1 });
+  assert.deepEqual(tools.simplifyNormalizedPath([
+    { x: 0, y: 0 }, { x: 0.001, y: 0.001 }, { x: 0.5, y: 0.5 },
+  ], 0.01), [{ x: 0, y: 0 }, { x: 0.5, y: 0.5 }]);
+});
+
+test("eraser hit testing selects the topmost matching mark", () => {
+  const marks = [
+    { type: "box", x1: 0.1, y1: 0.1, x2: 0.4, y2: 0.4 },
+    { type: "point", x: 0.25, y: 0.25 },
+  ];
+  assert.equal(tools.findAnnotationMarkAt(marks, { x: 0.25, y: 0.25 }, 0.03), 1);
 });
 ```
 
-Add assertions that the node defaults to `providerId: "volc"`, Pro model, PNG and standard optimization, and exposes point/box/arrow/brush controls in the overlay builder.
+These tests catch coordinate overflow, unbounded brush state and deletion of the wrong overlapping mark. Node registration is verified through the browser smoke test, not source text.
 
 - [ ] **Step 2: Run UI tests and verify RED**
 
-Run: `node --test server/seedream-editor-ui.test.js`
+Run: `node --test server/seedream-annotation.test.js`
 
 Expected: the node type and editor functions are absent.
 
@@ -320,7 +332,7 @@ The first incoming image label is “待编辑原图”, subsequent labels are �
 Run:
 
 ```powershell
-node --test server/seedream-editor-ui.test.js server/seedream-5-request.test.js
+node --test server/seedream-annotation.test.js server/seedream-5-request.test.js
 node --check public/app.js
 ```
 
@@ -331,8 +343,9 @@ Then start the existing app and manually verify the editor can draw, undo, erase
 ### Task 4: Add layer separation and editable layer groups
 
 **Files:**
-- Extend: `server/seedream-editor-ui.test.js`
+- Create: `server/seedream-layer-group.test.js`
 - Extend: `server/seedream-layer-response.test.js`
+- Modify: `public/seedream-tools.js`
 - Modify: `public/index.html` node menu
 - Modify: `public/app.js` node registration, generation, persistence, layer editor, connections
 - Modify: `public/styles.css` layer group and layer editor styles
@@ -346,7 +359,7 @@ Then start the existing app and manually verify the editor can draw, undo, erase
 - Produces: `openLayerGroupEditor(nodeId): Promise<void>`
 - Produces: `extractLayerAsImage(layerGroupId, layerId): Promise<string>`
 
-- [ ] **Step 1: Add failing request and node contract tests**
+- [ ] **Step 1: Add failing request and layer-transform behavior tests**
 
 ```js
 test("layer separation body uses the native Pro contract", () => {
@@ -356,13 +369,29 @@ test("layer separation body uses the native Pro contract", () => {
   assert.equal(body.image, "data:image/png;base64,AA==");
   assert.deepEqual(body.optimize_prompt_options, { mode: "standard" });
 });
+
+test("moving an unlocked layer clamps it to an explicit finite rectangle", () => {
+  const layer = { x: 10, y: 20, width: 100, height: 80, locked: false };
+  assert.deepEqual(tools.moveLayer(layer, 30, -10), { ...layer, x: 40, y: 10 });
+  assert.deepEqual(tools.moveLayer({ ...layer, locked: true }, 30, -10), { ...layer, locked: true });
+});
+
+test("layer order operations keep the background at the bottom", () => {
+  const layers = [
+    { id: "bg", role: "background", zIndex: 0 },
+    { id: "subject", zIndex: 1 },
+    { id: "title", zIndex: 2 },
+  ];
+  assert.deepEqual(tools.reorderLayer(layers, "subject", 1).map((v) => v.id), ["bg", "title", "subject"]);
+  assert.deepEqual(tools.reorderLayer(layers, "bg", 1).map((v) => v.id), ["bg", "subject", "title"]);
+});
 ```
 
-Static node assertions require `layerSeparation`, `layerGroup`, “编辑图层”, “提取为图片节点”, layer visibility, opacity and order actions.
+These tests exercise the same pure functions used by the real layer editor. Node/menu presence and pointer interaction are verified in the browser smoke test.
 
 - [ ] **Step 2: Run the tests and verify RED**
 
-Run: `node --test server/seedream-editor-ui.test.js server/seedream-layer-response.test.js`
+Run: `node --test server/seedream-layer-group.test.js server/seedream-layer-response.test.js`
 
 Expected: layer request and node functions are absent.
 
@@ -406,7 +435,7 @@ Show explicit messages for: missing input, input under 512px, more than one inpu
 Run:
 
 ```powershell
-node --test server/seedream-layer-response.test.js server/seedream-editor-ui.test.js
+node --test server/seedream-layer-response.test.js server/seedream-layer-group.test.js
 node --check public/app.js
 ```
 
@@ -471,4 +500,3 @@ git status --short
 ```
 
 Report the exact test count, remaining user-owned dirty files, changed files, limitations, and whether any paid API call was made.
-
