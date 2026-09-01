@@ -11,12 +11,41 @@ try {
 
 const {
   createKlingCli,
+  downloadRemoteImage,
   normalizeCapabilities,
   normalizeTask,
   buildGenerationArgs,
   isKlingProvider,
   usesCanvasBilling,
 } = klingModule;
+
+test("remote Kling image download accepts only public image responses", async () => {
+  assert.equal(typeof downloadRemoteImage, "function", "downloadRemoteImage should be exported");
+  const result = await downloadRemoteImage("https://cdn.example/input.png", async (url) => {
+    assert.equal(String(url), "https://cdn.example/input.png");
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: (name) => name.toLowerCase() === "content-type" ? "image/png" : null },
+      arrayBuffer: async () => Buffer.from("remote-image"),
+    };
+  });
+
+  assert.equal(result.contentType, "image/png");
+  assert.deepEqual(result.buffer, Buffer.from("remote-image"));
+});
+
+test("remote Kling image download blocks private hosts before fetching", async () => {
+  let fetched = false;
+  await assert.rejects(
+    () => downloadRemoteImage("http://127.0.0.1/private.png", async () => {
+      fetched = true;
+      throw new Error("must not fetch");
+    }),
+    /不允许访问本地或内网地址/,
+  );
+  assert.equal(fetched, false);
+});
 
 function createFixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kling-cli-test-"));
@@ -32,6 +61,14 @@ if (command === "echo") {
 } else if (command === "fail") {
   console.error("账户积分不足");
   process.exitCode = 7;
+} else if (command === "fail_with_context") {
+  console.error("[kling] image_to_video submit failed: reference image must come from file_upload");
+  console.error("[kling] Check the parameters and inputs against this model declaration:");
+  for (let i = 1; i <= 16; i += 1) console.error("  - generated_argument_" + i + ": model context line " + i);
+  console.error("[kling] inputs:");
+  console.error("  - first_image(required): Source image URL used as the first frame to animate.");
+  console.error("  - tail_image(optional): Optional tail image URL.");
+  process.exitCode = 7;
 } else if (command === "hang") {
   setTimeout(() => {}, 10000);
 } else if (command === "who_am_i") {
@@ -43,6 +80,11 @@ if (command === "echo") {
         alias: "可灵3.0, v3",
         arguments: [{ name: "prompt", required: false }, { name: "duration", required: true, default: "5", allowedValues: ["5", "10"] }],
         inputs: [{ name: "first_image", required: true }, { name: "tail_image", required: false }]
+      }, {
+        model: "kling-v3-strict-upload",
+        alias: "可灵3.0严格上传",
+        arguments: [{ name: "prompt", required: false }, { name: "duration", required: true, default: "5", allowedValues: ["5", "10"] }],
+        inputs: [{ name: "first_image", required: true, description: "Must be url returned by file_upload tool, no external url allowed." }]
       }] }
     }
   }}));
@@ -91,6 +133,31 @@ test("runner reports stderr when the CLI exits unsuccessfully", async (t) => {
   const cli = createKlingCli({ cliScriptPath: fixture.script });
 
   await assert.rejects(() => cli.run(["fail"], { timeoutMs: 1000 }), /账户积分不足/);
+});
+
+test("runner keeps the primary CLI failure when model context follows it", async (t) => {
+  const fixture = createFixture();
+  t.after(() => fs.rmSync(fixture.dir, { recursive: true, force: true }));
+  const cli = createKlingCli({ cliScriptPath: fixture.script });
+
+  await assert.rejects(
+    () => cli.run(["fail_with_context"], { timeoutMs: 1000 }),
+    /reference image must come from file_upload/,
+  );
+});
+
+test("runner records the summarized CLI failure for later diagnosis", async (t) => {
+  const fixture = createFixture();
+  const errorLogPath = path.join(fixture.dir, "kling-error.log");
+  t.after(() => fs.rmSync(fixture.dir, { recursive: true, force: true }));
+  const cli = createKlingCli({ cliScriptPath: fixture.script, errorLogPath });
+
+  await assert.rejects(() => cli.run(["fail_with_context"], { timeoutMs: 1000 }));
+  const entry = JSON.parse(fs.readFileSync(errorLogPath, "utf8").trim());
+
+  assert.equal(entry.command, "fail_with_context");
+  assert.match(entry.error, /reference image must come from file_upload/);
+  assert.doesNotMatch(entry.error, /generated_argument_16/);
 });
 
 test("runner terminates commands that exceed their timeout", async (t) => {
@@ -221,6 +288,35 @@ test("submit materializes a data URL only for the duration of CLI upload", async
   const imagePath = submittedArgs[submittedArgs.indexOf("--image") + 1];
 
   assert.deepEqual(result, { adapter: "kling-cli", id: "generated-123", status: "submitted" });
+  assert.match(imagePath, /kling-canvas-/);
+  assert.equal(fs.existsSync(imagePath), false, "temporary upload file should be removed after submission");
+});
+
+test("submit materializes external images when the live model requires file_upload URLs", async (t) => {
+  const fixture = createFixture();
+  const logPath = path.join(fixture.dir, "args.json");
+  t.after(() => fs.rmSync(fixture.dir, { recursive: true, force: true }));
+  const cli = createKlingCli({
+    cliScriptPath: fixture.script,
+    env: { FAKE_LOG: logPath },
+    fetchImage: async (url) => {
+      assert.equal(url, "https://cdn.example/input.png");
+      return { buffer: Buffer.from("remote-image"), contentType: "image/png" };
+    },
+  });
+
+  const result = await cli.submit({
+    tool: "image_to_video",
+    model: "kling-v3-strict-upload",
+    prompt: "镜头推进",
+    params: { duration: "5" },
+    images: ["https://cdn.example/input.png"],
+  });
+  const submittedArgs = JSON.parse(fs.readFileSync(logPath, "utf8"));
+  const imagePath = submittedArgs[submittedArgs.indexOf("--image") + 1];
+
+  assert.equal(result.id, "generated-123");
+  assert.notEqual(imagePath, "https://cdn.example/input.png");
   assert.match(imagePath, /kling-canvas-/);
   assert.equal(fs.existsSync(imagePath), false, "temporary upload file should be removed after submission");
 });

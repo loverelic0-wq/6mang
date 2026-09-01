@@ -78,7 +78,7 @@ try {
 所有图像/视频上游统一走 OpenAI 兼容协议（`/images/generations` + `/images/edits` + `/video/*`）。`server.js` 里 `/api/images/generations` 和 `/api/video/create` 做的模型嗅探：
 
 1. **图像 - 文生图（默认）** —— JSON body 打到 `/images/generations`。
-2. **图像 - 有参考图** —— 改走 `/images/edits`（multipart，`imageSourceToBlob` 把 data URL / http URL 转 Blob）；多图用 `image[]` 字段，单图用 `image`（按 NewAPI 文档推荐做法）。
+2. **图像 - 有参考图** —— 通用 Provider 改走 `/images/edits`（multipart，`imageSourceToBlob` 把 data URL / http URL 转 Blob）；火山方舟 Provider 仍以 JSON `image` 字段走 `/images/generations`，由 `server/image-routing.js` 统一选择协议。通用多图用 `image[]` 字段，单图用 `image`。
 3. **视频 - Sora**（`isSoraModel`，模型名以 `sora` 开头）—— 用 `{prompt, size, seconds, input_reference}`（参考图取 `images[0]`）。
 4. **视频 - 其他**（如 Veo、可灵等）—— 用 `{prompt, aspect_ratio, duration, images[], enable_upsample, enhance_prompt}`。`sizeToAspectRatio()` 把 `1280x720` 这种尺寸转成 `16:9`。
 
@@ -96,6 +96,16 @@ try {
 - `/api/images/generations` 根据参考图选择 `text_to_image` / `image_to_image`；`/api/video/create` 选择 `text_to_video` / `image_to_video`；结果统一经 `/api/kling/tasks/:id` 轮询回现有输出节点。
 - 可灵请求仍要求画布用户登录，但必须在 `db.adjustBalance()` 前分支；`usesCanvasBilling(provider)` 是计费边界的显式判定。
 - `public/kling-provider.js` 是无构建 UMD helper，负责能力过滤、动态字段、参数序列化和必填素材验证；`public/app.js` 只负责把它接到既有节点与设置面板。
+
+### Seedream 5.0 Pro 图片工作流
+
+- 火山图片 Provider `volc` 固定使用 Ark `/images/generations` JSON 协议；普通文生图、单图编辑和最多 10 张参考图融合都不切到 multipart `/images/edits`。协议选择和服务端前置校验集中在 `server/image-routing.js`。
+- `doubao-seedream-5-0-pro-260628` 只使用官方 1K/2K 精确像素尺寸；支持 `png/jpeg` 与 `optimize_prompt_options.mode=standard|fast`，必须省略 `sequential_image_generation`。Seedream 5.0 Lite 保留原 2K/3K/4K 尺寸和 `sequential_image_generation:"disabled"`。
+- `seedreamEdit` 是 Pro 专用的空间标注编辑节点。标记数据用归一化矢量坐标保存；生成时才把紫色点/框/箭头/画笔烘焙到第一张参考图，最多再接 9 张额外参考图。
+- `layerSeparation` 发送 `layer_decomposition:true`、单张 `image`、`size=auto|1K|1.5K|2K`、PNG 输出；服务端在扣费前验证必须是火山 Provider、Pro 模型和恰好一张图。
+- 图层响应首项是补全背景，其余项按 `z_index` 与 `bounding_box.absolute` 转为 `layerGroup`。背景及透明 PNG 立即下载到 IndexedDB，节点状态只保存 `idb-image:<assetId>` 和坐标/显隐/锁定/透明度等轻量元数据。
+- `public/seedream-tools.js` 是无构建 UMD helper，也是 Node 行为测试的真实入口；请求参数、响应解析、标注命中和图层变换优先在这里实现，避免用源码字符串测试替代行为测试。
+- 图层分离没有本地模拟结果：未配置火山图片 Key 时必须明确报错，不能把扁平占位图伪装成可编辑图层。
 
 ### `/api/image-proxy`（SSRF 保护）
 
@@ -140,6 +150,9 @@ try {
 | `imageConfig` | 文生图配置 | `generateImage` |
 | `storyboardConfig` | 故事板生成 | `generateStoryboard`，会展开多帧 |
 | `faceSwapConfig` | 换脸 | `generateFaceSwap`；接两张图片，按连线顺序 ①底图(保留)/②脸源(取脸)；指令式编辑（复用 `/api/images/generations` 多参考图 + `FACE_SWAP_PROMPT`，让模型在底图光照下重生成脸而非抠图粘贴），输出尺寸用 `nearestByAspect` 跟随底图比例；零后端改动，按 image 费率计费 |
+| `seedreamEdit` | 精确图片编辑 | Seedream 5.0 Pro 专用；空间标注 + 最多 10 图参考编辑 |
+| `layerSeparation` | 智能图层分离 | Seedream 5.0 Pro 原生图层分离配置；只接单图 |
+| `layerGroup` | 图层组 | IndexedDB 图层文档；支持移动、等比缩放、排序、显隐、锁定、透明度、重命名、合成与提取 |
 | `videoConfig` | 视频生成配置 | `generateVideo` |
 | `image` | 图片节点 / 载入图像 / 历史图片 | `data.url=false` 是待上传状态 |
 | `video` | 视频节点 / 载入视频 | 异步任务 `taskId` 轮询；空态支持 点击/拖入/粘贴 载入本地视频（blob 走 IndexedDB，`idb-image:` 哨兵） |

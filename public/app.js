@@ -678,13 +678,24 @@ function findProviderForModel(kind, modelId) {
 }
 
 function ensureNodeProvider(node) {
-  const kindMap = { llmConfig: "chat", storyboardAssistant: "chat", promptOptimizer: "chat", imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", faceSwapConfig: "image", videoConfig: "video" };
+  const kindMap = { llmConfig: "chat", storyboardAssistant: "chat", promptOptimizer: "chat", imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", faceSwapConfig: "image", seedreamEdit: "image", layerSeparation: "image", videoConfig: "video" };
   const kind = kindMap[node.type];
   if (!kind) return;
+  if (node.type === "seedreamEdit" || node.type === "layerSeparation") {
+    node.data.providerId = "volc";
+    node.data.model = "doubao-seedream-5-0-pro-260628";
+    return;
+  }
   const group = getProviderGroup(kind);
   if (!Object.keys(group.items).length) return;
   const existing = node.data.providerId && group.items[node.data.providerId] ? node.data.providerId : null;
-  if (existing) return;
+  if (existing) {
+    const selected = group.items[existing];
+    if (!node.data.model || selected.models?.some((model) => model.id === node.data.model)) return;
+    const found = findProviderForModel(kind, node.data.model);
+    if (found) node.data.providerId = found.providerId;
+    return;
+  }
   if (node.data.model) {
     const found = findProviderForModel(kind, node.data.model);
     if (found) { node.data.providerId = found.providerId; return; }
@@ -785,6 +796,9 @@ const nodeSizes = {
   imageCompare: { width: 320, height: 320 },
   imageExpand: { width: 320, height: 400 },
   faceSwapConfig: { width: 300, height: 250 },
+  seedreamEdit: { width: 330, height: 420 },
+  layerSeparation: { width: 320, height: 330 },
+  layerGroup: { width: 340, height: 430 },
   model3dPreview: { width: 280, height: 330 },
 };
 
@@ -1562,7 +1576,7 @@ async function saveSettingsDraft() {
 // ===== 快速切换 API 平台 =====
 const NODE_KIND_MAP_CLIENT = {
   llmConfig: "chat", storyboardAssistant: "chat", promptOptimizer: "chat",
-  imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", faceSwapConfig: "image",
+  imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", faceSwapConfig: "image", seedreamEdit: "image", layerSeparation: "image",
   videoConfig: "video",
 };
 
@@ -1638,6 +1652,7 @@ async function switchKindProvider(kind, providerId) {
   let migrated = 0;
   state.nodes.forEach((node) => {
     if (NODE_KIND_MAP_CLIENT[node.type] !== kind) return;
+    if (node.type === "seedreamEdit" || node.type === "layerSeparation") return;
     node.data.providerId = providerId;
     // model 映射：新平台有同名 model 就保留，否则用新平台默认 model。
     if (node.data.model && !models.some((m) => m.id === node.data.model)) {
@@ -2759,9 +2774,12 @@ function getGroupAtPoint(point) {
 
 function getNodeSize(node) {
   const fallback = nodeSizes[node?.type] || { width: 260, height: 220 };
+  const stored = node?.type === "layerGroup"
+    ? window.SeedreamTools.layerGroupLayout(node.data, fallback)
+    : { nodeWidth: node?.data?.width, nodeHeight: node?.data?.height };
   return {
-    width: clamp(Number(node?.data?.width) || fallback.width, getMinNodeSize(node?.type).width, 900),
-    height: clamp(Number(node?.data?.height) || fallback.height, getMinNodeSize(node?.type).height, 900),
+    width: clamp(Number(stored.nodeWidth) || fallback.width, getMinNodeSize(node?.type).width, 900),
+    height: clamp(Number(stored.nodeHeight) || fallback.height, getMinNodeSize(node?.type).height, 900),
   };
 }
 
@@ -2927,11 +2945,17 @@ function renderNodeBody(node) {
     const model = normalizeModelValue("image", node.data.model) || getDefaultModel("image");
     const klingTool = window.KlingProvider?.toolFor("image", refSlots.length > 0) || "";
     const klingParamRows = renderKlingDynamicParams(node, "image");
+    const seedreamProRows = isSeedream5ProImageModel(model) ? `
+      <div class="node-row"><span>尺寸</span><select data-field="size">${optionPairs(imageSizeOptions(model), getImageSizeValue(model, node.data.size))}</select></div>
+      <div class="node-row"><span>格式</span><select data-field="outputFormat">${optionPairs([["png", "PNG · 透明/无损"], ["jpeg", "JPEG · 更小文件"]], node.data.outputFormat || "png")}</select></div>
+      <div class="node-row"><span>提示词优化</span><select data-field="promptOptimization">${optionPairs([["standard", "标准 · 质量优先"], ["fast", "快速 · 速度优先"]], node.data.promptOptimization || "standard")}</select></div>` : "";
     const paramRows = klingParamRows || (isMjImageModel(model)
       ? `
       <div class="node-row"><span>比例</span><select data-field="mjAr">${options(mjAspectOptions, node.data.mjAr || "1:1")}</select></div>
       <div class="node-row"><span>版本</span><select data-field="mjVersion">${options(mjVersionsFor(model), getMjVersion(model, node.data.mjVersion))}</select></div>
       <div class="node-row"><span>速度</span><select data-field="mjSpeed">${options(mjSpeedOptions, node.data.mjSpeed || "fast")}</select></div>`
+      : seedreamProRows
+        ? seedreamProRows
       : `
       <div class="node-row"><span>画质</span><select data-field="quality">${options(["标准画质", "高清画质", "4K"], node.data.quality)}</select></div>
       <div class="node-row"><span>尺寸</span><select data-field="size">${optionPairs(imageSizeOptions(model), getImageSizeValue(model, node.data.size))}</select></div>`);
@@ -2963,6 +2987,73 @@ function renderNodeBody(node) {
       </div>
       <div class="node-tip">第1张连入=底图（保留构图/光影），第2张=脸源（取这张的脸）</div>
       <button class="node-button" data-node-action="generate-faceswap" ${ready ? "" : "disabled"}>换脸</button>
+    `;
+  }
+
+  if (node.type === "seedreamEdit") {
+    const slots = getImageReferenceSlots(node.id);
+    const hasBase = Boolean(slots[0]?.node?.data?.url);
+    const marks = Array.isArray(node.data.annotation?.marks) ? node.data.annotation.marks : [];
+    const model = normalizeModelValue("image", node.data.model) || "doubao-seedream-5-0-pro-260628";
+    return `
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", node.data.providerId, model, "image_to_image")}</select></div>
+      <div class="node-row"><span>尺寸</span><select data-field="size">${optionPairs(imageSizeOptions(model), getImageSizeValue(model, node.data.size))}</select></div>
+      <div class="node-row"><span>格式</span><select data-field="outputFormat">${optionPairs([["png", "PNG"], ["jpeg", "JPEG"]], node.data.outputFormat || "png")}</select></div>
+      <div class="node-row"><span>优化</span><select data-field="promptOptimization">${optionPairs([["standard", "标准"], ["fast", "快速"]], node.data.promptOptimization || "standard")}</select></div>
+      <div class="node-row node-row-col"><span>编辑要求</span><textarea data-field="prompt" placeholder="例：把框选区域的沙发改成墨绿色天鹅绒">${escapeHtml(node.data.prompt || "")}</textarea></div>
+      <div class="node-indicators">
+        <span class="indicator ${hasBase ? "ready" : ""}">待编辑原图 ${hasBase ? "✓" : "○"}</span>
+        <span class="indicator ${marks.length ? "ready" : ""}">空间标记 ${marks.length || "○"}</span>
+        ${slots.length > 1 ? `<span class="indicator ready">额外参考 ${slots.length - 1}</span>` : ""}
+      </div>
+      <div class="node-split">
+        <button class="node-secondary-button" data-node-action="open-seedream-editor" ${hasBase ? "" : "disabled"}>标记区域</button>
+        <button class="node-button" data-node-action="generate-seedream-edit" ${hasBase ? "" : "disabled"}>生成编辑结果</button>
+      </div>
+    `;
+  }
+
+  if (node.type === "layerSeparation") {
+    const slots = getImageReferenceSlots(node.id);
+    const ready = slots.length === 1 && Boolean(slots[0]?.node?.data?.url);
+    const hasPendingImport = Boolean(node.data.pendingLayerResponse);
+    return `
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", node.data.providerId, node.data.model, "image_to_image")}</select></div>
+      <div class="node-row"><span>分层尺寸</span><select data-field="size">${optionPairs([["auto", "自动"], ["1K", "1K"], ["1.5K", "1.5K"], ["2K", "2K"]], node.data.size || "auto")}</select></div>
+      <div class="node-row"><span>优化</span><select data-field="promptOptimization">${optionPairs([["standard", "标准"], ["fast", "快速"]], node.data.promptOptimization || "standard")}</select></div>
+      <div class="node-row"><span>随机种子</span><input type="number" min="0" max="2147483647" step="1" data-field="seed" value="${escapeHtml(node.data.seed ?? 0)}"></div>
+      <div class="node-row node-row-col"><span>拆分说明（可空）</span><textarea data-field="prompt" placeholder="自动识别主要元素；或指定：人物、标题、商品、装饰、背景">${escapeHtml(node.data.prompt || "")}</textarea></div>
+      <div class="node-indicators">
+        <span class="indicator ${ready ? "ready" : ""}">单张原图 ${ready ? "✓" : slots.length ? `${slots.length} 张` : "○"}</span>
+        <span class="indicator">透明 PNG · 最多 16 层</span>
+      </div>
+      ${node.data.error ? `<div class="node-inline-error">${escapeHtml(node.data.error)}</div>` : ""}
+      <button class="node-button" data-node-action="generate-layer-separation" ${ready ? "" : "disabled"}>${hasPendingImport ? "重试导入已生成图层" : "分离为可编辑图层"}</button>
+    `;
+  }
+
+  if (node.type === "layerGroup") {
+    const layers = Array.isArray(node.data.layers) ? [...node.data.layers].sort((a, b) => b.zIndex - a.zIndex) : [];
+    const layout = window.SeedreamTools.layerGroupLayout(node.data, nodeSizes.layerGroup);
+    const source = node.data.url || (node.data.compositeAssetId ? `${imageAssetPrefix}${node.data.compositeAssetId}` : "");
+    const displaySource = source ? imageDisplaySource(source) : "";
+    const preview = source
+      ? `<div class="image-preview has-image layer-group-preview" style="aspect-ratio:${layout.aspectRatio}"><img class="generated-image" src="${escapeHtml(displaySource)}" data-asset-url="${escapeHtml(source)}" alt="图层组合预览"></div>`
+      : `<div class="empty-media">等待图层数据</div>`;
+    const layerRows = layers.slice(0, 6).map((layer) => `
+      <div class="layer-group-row ${layer.visible === false ? "muted" : ""}">
+        <span>${layer.role === "background" ? "▣" : "◇"}</span>
+        <b>${escapeHtml(layer.name || "未命名图层")}</b>
+        <small>${Math.round((Number(layer.opacity) || 0) * 100)}%</small>
+      </div>`).join("");
+    return `
+      ${preview}
+      <div class="layer-group-summary"><span>${layers.length} 个图层</span><span>${layout.documentWidth}×${layout.documentHeight}</span></div>
+      <div class="layer-group-list">${layerRows || `<div class="layer-group-empty">暂无图层</div>`}${layers.length > 6 ? `<small>另有 ${layers.length - 6} 层…</small>` : ""}</div>
+      <div class="node-split">
+        <button class="node-secondary-button" data-node-action="layer-group-to-image" ${source ? "" : "disabled"}>合成为图片</button>
+        <button class="node-button" data-node-action="open-layer-editor" ${layers.length ? "" : "disabled"}>编辑图层</button>
+      </div>
     `;
   }
 
@@ -3381,6 +3472,66 @@ async function persistImageBlob(blob) {
   return `${imageAssetPrefix}${id}`;
 }
 
+async function probeImageDimensions(source) {
+  const display = await getDisplayImageUrl(source);
+  if (!display) return { width: 0, height: 0 };
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => resolve({ width: image.naturalWidth || 0, height: image.naturalHeight || 0 });
+    image.onerror = () => resolve({ width: 0, height: 0 });
+    image.src = display;
+  });
+}
+
+async function persistLayerImageSource(source) {
+  const existingId = getIndexedImageId(source);
+  if (existingId) {
+    const dimensions = await probeImageDimensions(source);
+    return { assetId: existingId, ...dimensions };
+  }
+  const response = await fetch(imageDisplaySource(source));
+  if (!response.ok) throw new Error(`图层下载失败（HTTP ${response.status}）`);
+  const blob = await response.blob();
+  if (!String(blob.type || "").startsWith("image/")) throw new Error("图层接口返回了非图片文件");
+  const sentinel = await persistImageBlob(blob);
+  const dimensions = await probeImageDimensions(sentinel);
+  return { assetId: getIndexedImageId(sentinel), ...dimensions };
+}
+
+async function persistCanvasDataUrl(dataUrl) {
+  const blob = await (await fetch(dataUrl)).blob();
+  return persistImageBlob(blob);
+}
+
+async function loadCanvasImage(source) {
+  const display = await getDisplayImageUrl(source);
+  if (!display) throw new Error("图层图片资源不可用");
+  const image = new Image();
+  image.src = display;
+  await new Promise((resolve, reject) => {
+    image.onload = resolve;
+    image.onerror = () => reject(new Error("图层图片加载失败"));
+  });
+  return image;
+}
+
+async function composeLayerGroupDataUrl(groupData) {
+  const width = Math.max(1, Math.round(Number(groupData?.width) || 1));
+  const height = Math.max(1, Math.round(Number(groupData?.height) || 1));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  const plan = window.SeedreamTools.layerRenderPlan(groupData?.layers);
+  for (const layer of plan) {
+    const image = await loadCanvasImage(`${imageAssetPrefix}${layer.assetId}`);
+    ctx.globalAlpha = layer.opacity;
+    ctx.drawImage(image, Number(layer.x) || 0, Number(layer.y) || 0, Number(layer.width) || image.naturalWidth, Number(layer.height) || image.naturalHeight);
+  }
+  ctx.globalAlpha = 1;
+  return canvas.toDataURL("image/png");
+}
+
 async function loadImageFileIntoNode(file, nodeId) {
   const node = getNode(nodeId);
   if (!node || node.type !== "image") return false;
@@ -3412,6 +3563,260 @@ async function createUploadedImageNode(file, position) {
   if (file) await loadImageFileIntoNode(file, id);
   else triggerImageUpload(id);
   return id;
+}
+
+function drawSeedreamAnnotationMarks(ctx, marks, width, height) {
+  const color = "#8b5cf6";
+  const lineWidth = Math.max(4, Math.min(width, height) * 0.006);
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = lineWidth;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (const mark of Array.isArray(marks) ? marks : []) {
+    if (mark.type === "point") {
+      const x = mark.x * width;
+      const y = mark.y * height;
+      const radius = lineWidth * 2.2;
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x - radius * 1.5, y);
+      ctx.lineTo(x + radius * 1.5, y);
+      ctx.moveTo(x, y - radius * 1.5);
+      ctx.lineTo(x, y + radius * 1.5);
+      ctx.stroke();
+    } else if (mark.type === "box") {
+      const x = Math.min(mark.x1, mark.x2) * width;
+      const y = Math.min(mark.y1, mark.y2) * height;
+      ctx.strokeRect(x, y, Math.abs(mark.x2 - mark.x1) * width, Math.abs(mark.y2 - mark.y1) * height);
+    } else if (mark.type === "arrow") {
+      const x1 = mark.x1 * width;
+      const y1 = mark.y1 * height;
+      const x2 = mark.x2 * width;
+      const y2 = mark.y2 * height;
+      const angle = Math.atan2(y2 - y1, x2 - x1);
+      const head = lineWidth * 4;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.lineTo(x2 - Math.cos(angle - Math.PI / 6) * head, y2 - Math.sin(angle - Math.PI / 6) * head);
+      ctx.moveTo(x2, y2);
+      ctx.lineTo(x2 - Math.cos(angle + Math.PI / 6) * head, y2 - Math.sin(angle + Math.PI / 6) * head);
+      ctx.stroke();
+    } else if (mark.type === "brush" && Array.isArray(mark.points) && mark.points.length) {
+      ctx.beginPath();
+      ctx.moveTo(mark.points[0].x * width, mark.points[0].y * height);
+      for (const point of mark.points.slice(1)) ctx.lineTo(point.x * width, point.y * height);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+async function renderAnnotatedImage(source, annotation) {
+  const displaySource = await getDisplayImageUrl(source);
+  if (!displaySource) throw new Error("待编辑原图不可用");
+  const image = new Image();
+  image.crossOrigin = "anonymous";
+  image.src = displaySource;
+  await new Promise((resolve, reject) => {
+    image.onload = resolve;
+    image.onerror = () => reject(new Error("待编辑原图加载失败"));
+  });
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(image, 0, 0);
+  drawSeedreamAnnotationMarks(ctx, annotation?.marks, canvas.width, canvas.height);
+  return canvas.toDataURL("image/png");
+}
+
+let activeSeedreamAnnotationEditor = null;
+
+async function openSeedreamAnnotationEditor(nodeId) {
+  const node = getNode(nodeId);
+  const baseNode = getImageReferenceSlots(nodeId)[0]?.node;
+  if (!node || node.type !== "seedreamEdit" || !baseNode?.data?.url) {
+    showToast("先连接一张待编辑原图");
+    return;
+  }
+  activeSeedreamAnnotationEditor?.();
+  const displaySource = await getDisplayImageUrl(baseNode.data.url);
+  const image = new Image();
+  image.crossOrigin = "anonymous";
+  image.src = displaySource;
+  try {
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = () => reject(new Error("待编辑原图加载失败"));
+    });
+  } catch (error) {
+    showToast(error.message);
+    return;
+  }
+
+  const overlay = document.createElement("div");
+  overlay.className = "seedream-editor-overlay";
+  overlay.innerHTML = `
+    <div class="seedream-editor-dialog">
+      <header class="seedream-editor-head">
+        <div><strong>Seedream 精确编辑</strong><small>紫色标记只用于告诉模型修改位置</small></div>
+        <button type="button" data-seedream-editor-action="close" aria-label="关闭">×</button>
+      </header>
+      <div class="seedream-editor-body">
+        <aside class="seedream-editor-tools" aria-label="标注工具">
+          <button type="button" class="active" data-seedream-tool="point">点</button>
+          <button type="button" data-seedream-tool="box">框</button>
+          <button type="button" data-seedream-tool="arrow">箭头</button>
+          <button type="button" data-seedream-tool="brush">画笔</button>
+          <button type="button" data-seedream-tool="eraser">橡皮</button>
+          <span></span>
+          <button type="button" data-seedream-editor-action="undo">撤销</button>
+          <button type="button" data-seedream-editor-action="clear">清空</button>
+        </aside>
+        <div class="seedream-editor-stage"><canvas></canvas></div>
+      </div>
+      <footer class="seedream-editor-foot">
+        <span data-seedream-mark-count></span>
+        <span class="seedream-editor-tip">点/框/箭头适合精确定位，画笔适合不规则区域</span>
+        <button type="button" class="node-secondary-button" data-seedream-editor-action="close">取消</button>
+        <button type="button" class="node-button" data-seedream-editor-action="apply">应用标注</button>
+      </footer>
+    </div>`;
+  document.body.append(overlay);
+
+  const canvas = overlay.querySelector("canvas");
+  const ctx = canvas.getContext("2d");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  let tool = "point";
+  let pointerId = null;
+  let activeMark = null;
+  let draft = JSON.parse(JSON.stringify(node.data.annotation || { version: 1, marks: [] }));
+  draft.version = 1;
+  draft.width = image.naturalWidth;
+  draft.height = image.naturalHeight;
+  draft.marks = Array.isArray(draft.marks) ? draft.marks : [];
+  const undoStack = [];
+
+  const cloneMarks = () => JSON.parse(JSON.stringify(draft.marks));
+  const remember = () => {
+    undoStack.push(cloneMarks());
+    if (undoStack.length > 30) undoStack.shift();
+  };
+  const draw = () => {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(image, 0, 0);
+    drawSeedreamAnnotationMarks(ctx, draft.marks, canvas.width, canvas.height);
+    overlay.querySelector("[data-seedream-mark-count]").textContent = `已标记 ${draft.marks.length} 处`;
+  };
+  const pointFromEvent = (event) => {
+    const rect = canvas.getBoundingClientRect();
+    return window.SeedreamTools.clampNormalizedPoint({
+      x: (event.clientX - rect.left) / rect.width,
+      y: (event.clientY - rect.top) / rect.height,
+    });
+  };
+  const cleanup = () => {
+    document.removeEventListener("keydown", onKeydown);
+    overlay.remove();
+    if (activeSeedreamAnnotationEditor === cleanup) activeSeedreamAnnotationEditor = null;
+  };
+  const onKeydown = (event) => {
+    if (event.key === "Escape") cleanup();
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+      event.preventDefault();
+      if (undoStack.length) {
+        draft.marks = undoStack.pop();
+        draw();
+      }
+    }
+  };
+  activeSeedreamAnnotationEditor = cleanup;
+  document.addEventListener("keydown", onKeydown);
+
+  overlay.addEventListener("click", (event) => {
+    const toolButton = event.target.closest("[data-seedream-tool]");
+    if (toolButton) {
+      tool = toolButton.dataset.seedreamTool;
+      overlay.querySelectorAll("[data-seedream-tool]").forEach((button) => button.classList.toggle("active", button === toolButton));
+      return;
+    }
+    const action = event.target.closest("[data-seedream-editor-action]")?.dataset.seedreamEditorAction;
+    if (action === "close") cleanup();
+    if (action === "undo" && undoStack.length) {
+      draft.marks = undoStack.pop();
+      draw();
+    }
+    if (action === "clear" && draft.marks.length) {
+      remember();
+      draft.marks = [];
+      draw();
+    }
+    if (action === "apply") {
+      commitHistory();
+      updateNode(nodeId, { annotation: draft });
+      cleanup();
+      showToast(`已保存 ${draft.marks.length} 处空间标记`);
+    }
+  });
+
+  canvas.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    const point = pointFromEvent(event);
+    if (tool === "eraser") {
+      const rect = canvas.getBoundingClientRect();
+      const tolerance = 14 / Math.max(1, Math.min(rect.width, rect.height));
+      const index = window.SeedreamTools.findAnnotationMarkAt(draft.marks, point, tolerance);
+      if (index >= 0) {
+        remember();
+        draft.marks.splice(index, 1);
+        draw();
+      }
+      return;
+    }
+    remember();
+    pointerId = event.pointerId;
+    canvas.setPointerCapture(pointerId);
+    if (tool === "point") {
+      draft.marks.push({ type: "point", ...point });
+      pointerId = null;
+    } else if (tool === "box" || tool === "arrow") {
+      activeMark = { type: tool, x1: point.x, y1: point.y, x2: point.x, y2: point.y };
+      draft.marks.push(activeMark);
+    } else if (tool === "brush") {
+      activeMark = { type: "brush", points: [point] };
+      draft.marks.push(activeMark);
+    }
+    draw();
+  });
+
+  canvas.addEventListener("pointermove", (event) => {
+    if (pointerId !== event.pointerId || !activeMark) return;
+    const point = pointFromEvent(event);
+    if (activeMark.type === "box" || activeMark.type === "arrow") {
+      activeMark.x2 = point.x;
+      activeMark.y2 = point.y;
+    } else if (activeMark.type === "brush") {
+      activeMark.points.push(point);
+    }
+    draw();
+  });
+
+  const finishPointer = (event) => {
+    if (pointerId !== event.pointerId) return;
+    if (activeMark?.type === "brush") activeMark.points = window.SeedreamTools.simplifyNormalizedPath(activeMark.points);
+    pointerId = null;
+    activeMark = null;
+    draw();
+  };
+  canvas.addEventListener("pointerup", finishPointer);
+  canvas.addEventListener("pointercancel", finishPointer);
+  draw();
 }
 
 function pickImageFile(fileList) {
@@ -4067,6 +4472,7 @@ function getReferenceMaterialSlots(targetId) {
     .map((edge) => ({ edge, node: getNode(edge.source) }))
     .filter(({ node }) =>
       node?.type === "image" ||
+      (node?.type === "layerGroup" && node.data?.url) ||
       node?.type === "video" ||
       (node?.type === "model3dPreview" && node.data?.url));
   let imageN = 0;
@@ -4210,11 +4616,50 @@ function addNode(type, position = getViewportCenter(), data = {}) {
       model: getDefaultModel("chat"),
       fields: { subject: "", structure: "", material: "", lighting: "", style: "", composition: "" },
     },
-    imageConfig: { label: "图片生成", model: getDefaultModel("image"), quality: "标准画质", size: getImageSizeValue(getDefaultModel("image"), "2048x2048") },
+    imageConfig: {
+      label: "图片生成",
+      model: getDefaultModel("image"),
+      quality: "标准画质",
+      size: getImageSizeValue(getDefaultModel("image"), "2048x2048"),
+      outputFormat: "png",
+      promptOptimization: "standard",
+    },
     image: { label: "图片节点", url: false },
     imageCompare: { label: "图片对比", split: 50 },
     imageExpand: { label: "图片扩展", padL: 0, padR: 0, padT: 0, padB: 0, lockRatio: false, prompt: "", model: "gpt-image-2" },
     faceSwapConfig: { label: "换脸", model: getDefaultModel("image"), size: getImageSizeValue(getDefaultModel("image"), "2048x2048"), quality: "高清画质", extra: "" },
+    seedreamEdit: {
+      label: "精确图片编辑",
+      providerId: "volc",
+      model: "doubao-seedream-5-0-pro-260628",
+      size: "2048x2048",
+      outputFormat: "png",
+      promptOptimization: "standard",
+      prompt: "",
+      annotation: { version: 1, width: 0, height: 0, marks: [] },
+    },
+    layerSeparation: {
+      label: "智能图层分离",
+      providerId: "volc",
+      model: "doubao-seedream-5-0-pro-260628",
+      prompt: "",
+      size: "auto",
+      promptOptimization: "standard",
+      seed: 0,
+      error: "",
+      pendingLayerResponse: null,
+      pendingLayerSourceRevision: "",
+    },
+    layerGroup: {
+      label: "图层组",
+      width: 1,
+      height: 1,
+      sourceNodeId: "",
+      compositeAssetId: "",
+      selectedLayerId: "",
+      url: "",
+      layers: [],
+    },
     model3dPreview: { label: "3D 模型预览", url: false, modelAssetId: "", modelName: "", modelFormat: "", renderMode: "clay", view: null },
     videoConfig: { label: "视频生成", model: getDefaultModel("video"), videoMode: "reference", ratio: "16:9", seconds: 8 },
     video: { label: "视频节点", url: false },
@@ -4410,6 +4855,8 @@ const seedreamImageSizes = [
   ["2048x2048", "1:1 · 2048×2048"],
   ["4096x2160", "16:9 · 4096×2160"],
 ];
+const seedream5ProImageSizes = window.SeedreamTools?.PRO_IMAGE_SIZES || [];
+const seedream5ImageSizes = window.SeedreamTools?.LITE_IMAGE_SIZES || [];
 const gptImageSizes = [
   ["1024x1024", "1:1 · 1024×1024"],
   ["1536x1024", "16:9 · 1536×1024"],
@@ -4439,6 +4886,14 @@ function isStandardImageModel(model) {
   ].includes(normalizeModelValue("image", model));
 }
 
+function isSeedream5ImageModel(model) {
+  return Boolean(window.SeedreamTools?.isSeedream5Model(normalizeModelValue("image", model)));
+}
+
+function isSeedream5ProImageModel(model) {
+  return Boolean(window.SeedreamTools?.isProModel(normalizeModelValue("image", model)));
+}
+
 function mapImageQuality(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -4463,6 +4918,8 @@ function isFluxImageModel(model) {
 }
 
 function imageSizeOptions(model) {
+  const seedreamSizes = window.SeedreamTools?.imageSizeOptions(normalizeModelValue("image", model));
+  if (seedreamSizes) return seedreamSizes;
   if (isStandardImageModel(model)) {
     return [...gptImageSizes, ...gptImage2ExtraSizes];
   }
@@ -4549,7 +5006,8 @@ function aspectLabelFromImageConfigs(nodeId) {
   return nearestByAspect(model3dRatios.map((r) => r[0]), ar);
 }
 
-function normalizeImageSize(size) {
+function normalizeImageSize(model, size) {
+  if (isSeedream5ImageModel(model)) return String(size);
   if (!size) return "2K";
   if (String(size).includes("4096")) return "4K";
   if (String(size).includes("2048")) return "2K";
@@ -4753,19 +5211,28 @@ function buildImageGenerationBody(configNode, prompt, refImages = []) {
     };
   }
 
+  const seedreamOptions = window.SeedreamTools?.buildGenerationOptions(model, {
+    size: normalizeImageSize(model, size),
+    outputFormat: configNode.data.outputFormat,
+    promptOptimization: configNode.data.promptOptimization,
+  });
   const body = {
     providerId,
     model,
     prompt,
-    sequential_image_generation: "disabled",
-    size: normalizeImageSize(size),
-    watermark: false,
+    ...(seedreamOptions || {
+      sequential_image_generation: "disabled",
+      size: normalizeImageSize(model, size),
+      watermark: false,
+    }),
   };
   if (refImages.length) body.image = refImages;
   return body;
 }
 
 function extractImageSource(payload) {
+  const seedreamItems = window.SeedreamTools?.extractImageItems(payload) || [];
+  if (seedreamItems[0]?.source) return seedreamItems[0].source;
   const visited = new Set();
   const preferredKeys = ["url", "image_url", "imageUrl", "output_url", "outputUrl", "b64_json", "base64", "image_base64"];
   const containerKeys = ["data", "images", "image", "output", "result", "results"];
@@ -5034,6 +5501,485 @@ async function generateFaceSwap(configId) {
     processing.hidden = true;
     showToast(`换脸失败：${error.message}`);
   }
+}
+
+async function generateSeedreamEdit(configId) {
+  const config = getNode(configId);
+  if (!config || config.type !== "seedreamEdit") return;
+  const model = normalizeModelValue("image", config.data.model) || "doubao-seedream-5-0-pro-260628";
+  if (!isSeedream5ProImageModel(model)) {
+    showToast("精确图片编辑需要选择豆包 Seedream 5.0 Pro");
+    return;
+  }
+  const slots = getImageReferenceSlots(configId);
+  if (!slots[0]?.node?.data?.url) {
+    showToast("先连接一张待编辑原图");
+    return;
+  }
+  if (slots.length > 10) {
+    showToast("Seedream 5.0 Pro 最多支持 10 张输入图片");
+    return;
+  }
+  const marks = Array.isArray(config.data.annotation?.marks) ? config.data.annotation.marks : [];
+  const prompt = window.SeedreamTools.buildPreciseEditPrompt(
+    String(config.data.prompt || "").trim() || "按照标记位置精确编辑图片，使修改自然融入原画面。",
+    marks,
+  );
+  const existing = findOutputImageNode(configId);
+  let imageId = existing?.id || null;
+  if (!imageId) {
+    imageId = addNode("image", { x: config.position.x + 420, y: config.position.y }, { label: "精确编辑结果", loading: true, model });
+    addEdge(configId, imageId, "output", { label: "编辑结果" });
+  } else {
+    updateNode(imageId, { loading: true, url: false, error: "" });
+  }
+
+  const configured = hasApiKey("image", config.data.providerId);
+  showProcessing(configured ? "正在执行 Seedream 精确编辑..." : "未配置火山图片 API Key，使用本地模拟生成...");
+  if (!configured) {
+    setTimeout(() => {
+      updateNode(imageId, { loading: false, url: true, model, gradient: generateGradient("seedream-edit"), error: "" });
+      updateNode(configId, { executed: true });
+      hideProcessing("精确编辑完成（模拟）");
+    }, 850);
+    return;
+  }
+
+  try {
+    const baseNode = slots[0].node;
+    const baseSource = marks.length
+      ? await renderAnnotatedImage(baseNode.data.url, config.data.annotation)
+      : await resolveImageForApi(baseNode.data.url);
+    const extraSources = (await Promise.all(slots.slice(1).map((slot) => resolveImageForApi(slot.node.data.url)))).filter(Boolean);
+    if (!baseSource) throw new Error("待编辑原图读取失败");
+    const aspect = await probeImageAspect(baseNode.data.url);
+    const size = aspect
+      ? nearestByAspect(imageSizeOptions(model).map(([value]) => value), aspect)
+      : getImageSizeValue(model, config.data.size);
+    const requestConfig = { ...config, data: { ...config.data, model, size } };
+    const url = await requestImageGeneration(requestConfig, prompt, [baseSource, ...extraSources]);
+    updateNode(imageId, { loading: false, url, model, gradient: generateGradient("seedream-edit"), error: "" });
+    updateNode(configId, { executed: true, size });
+    hideProcessing("精确编辑完成");
+    void recordProjectHistory({ type: "image", url, prompt, model });
+  } catch (error) {
+    updateNode(imageId, { loading: false, url: false, error: friendlyImageError(error.message) });
+    processing.hidden = true;
+    showToast(`精确编辑失败：${error.message}`);
+  }
+}
+
+function findOutputLayerGroupNode(configId) {
+  return state.edges
+    .filter((edge) => edge.source === configId)
+    .map((edge) => getNode(edge.target))
+    .find((node) => node?.type === "layerGroup");
+}
+
+async function requestLayerSeparation(configNode, source) {
+  const body = window.SeedreamTools.buildLayerSeparationBody({
+    providerId: configNode.data.providerId || "volc",
+    model: normalizeModelValue("image", configNode.data.model) || "doubao-seedream-5-0-pro-260628",
+    prompt: configNode.data.prompt,
+    size: configNode.data.size,
+    seed: configNode.data.seed,
+    promptOptimization: configNode.data.promptOptimization,
+  }, source);
+  return apiFetch("/api/images/generations", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+function serializableLayerResponse(parsed) {
+  const entries = [parsed?.background, ...(parsed?.layers || [])];
+  if (!entries.length || entries.some((entry) => !/^https?:\/\//i.test(String(entry?.source || "")))) return null;
+  const clean = (entry) => ({
+    source: entry.source,
+    name: entry.name || "",
+    description: entry.description || "",
+    role: entry.role || "layer",
+    zIndex: Number(entry.zIndex) || 0,
+    responseIndex: Number(entry.responseIndex) || 0,
+    bbox: entry.bbox ? { ...entry.bbox } : null,
+    flags: [...(entry.flags || [])],
+  });
+  return { background: clean(parsed.background), layers: parsed.layers.map(clean) };
+}
+
+function imageSourceRevision(source) {
+  const text = String(source || "");
+  const sample = text.length <= 4096 ? text : `${text.slice(0, 2048)}${text.slice(-2048)}`;
+  let hash = 2166136261;
+  for (let index = 0; index < sample.length; index += 1) {
+    hash ^= sample.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${text.length}:${(hash >>> 0).toString(16)}`;
+}
+
+async function materializeLayerGroup(config, sourceNode, parsed) {
+  const layerEntries = [parsed.background, ...parsed.layers];
+  const stored = await Promise.all(layerEntries.map((entry) => persistLayerImageSource(entry.source)));
+  const assets = stored.map((asset) => ({
+    assetId: asset.assetId,
+    nativeWidth: asset.width,
+    nativeHeight: asset.height,
+  }));
+  const groupData = window.SeedreamTools.createLayerGroupData(parsed, assets, {
+    label: `${sourceNode.data.label || "图片"} · 图层组`,
+    sourceNodeId: sourceNode.id,
+  });
+  const composite = await composeLayerGroupDataUrl(groupData);
+  const compositeSentinel = await persistCanvasDataUrl(composite);
+  groupData.compositeAssetId = getIndexedImageId(compositeSentinel);
+  groupData.url = compositeSentinel;
+
+  const existing = findOutputLayerGroupNode(config.id);
+  if (existing) {
+    updateNode(existing.id, groupData);
+  } else {
+    const groupId = addNode("layerGroup", { x: config.position.x + 390, y: config.position.y }, groupData);
+    addEdge(config.id, groupId, "output", { label: "图层文档" });
+  }
+  return parsed.layers.length;
+}
+
+async function refreshLayerGroupComposite(groupId) {
+  const group = getNode(groupId);
+  if (!group || group.type !== "layerGroup" || !group.data.layers?.length) return "";
+  const dataUrl = await composeLayerGroupDataUrl(group.data);
+  const sentinel = await persistCanvasDataUrl(dataUrl);
+  updateNode(groupId, { compositeAssetId: getIndexedImageId(sentinel), url: sentinel });
+  return sentinel;
+}
+
+async function generateLayerSeparation(configId) {
+  const config = getNode(configId);
+  if (!config || config.type !== "layerSeparation") return;
+  const model = normalizeModelValue("image", config.data.model) || "doubao-seedream-5-0-pro-260628";
+  if (!isSeedream5ProImageModel(model)) {
+    updateNode(configId, { error: "智能图层分离仅支持豆包 Seedream 5.0 Pro。" });
+    showToast("智能图层分离需要选择豆包 Seedream 5.0 Pro");
+    return;
+  }
+  const slots = getImageReferenceSlots(configId);
+  if (slots.length !== 1 || !slots[0]?.node?.data?.url) {
+    updateNode(configId, { error: "请只连接一张待拆分原图。" });
+    showToast("智能图层分离需要且只能连接一张原图");
+    return;
+  }
+  const sourceNode = slots[0].node;
+  const sourceRevision = imageSourceRevision(sourceNode.data.url);
+  const dimensions = await probeImageDimensions(sourceNode.data.url);
+  const aspect = dimensions.height ? dimensions.width / dimensions.height : 0;
+  if (!dimensions.width || !dimensions.height) {
+    updateNode(configId, { error: "无法读取原图尺寸，请重新载入图片。" });
+    return;
+  }
+  if (Math.min(dimensions.width, dimensions.height) < 512 || aspect < 1 / 16 || aspect > 16) {
+    updateNode(configId, { error: "原图短边需至少 512px，宽高比需在 1:16～16:1 内。" });
+    showToast("原图尺寸不符合图层分离要求");
+    return;
+  }
+  if (config.data.pendingLayerResponse) {
+    if (config.data.pendingLayerSourceRevision !== sourceRevision) {
+      updateNode(configId, { pendingLayerResponse: null, pendingLayerSourceRevision: "", error: "原图已经变化，已丢弃旧图层的待导入记录；请重新点击分离。" });
+      showToast("原图已变化，请重新点击图层分离");
+      return;
+    }
+    updateNode(configId, { error: "", loading: true });
+    showProcessing("正在重新下载并导入已生成的图层...");
+    try {
+      const count = await materializeLayerGroup(config, sourceNode, config.data.pendingLayerResponse);
+      updateNode(configId, { executed: true, loading: false, error: "", pendingLayerResponse: null, pendingLayerSourceRevision: "" });
+      hideProcessing(`图层导入完成：背景 + ${count} 个透明图层`);
+    } catch (error) {
+      updateNode(configId, { loading: false, error: `已生成图层仍未导入：${error.message}` });
+      processing.hidden = true;
+      showToast(`图层导入失败：${error.message}`);
+    }
+    return;
+  }
+  if (!hasApiKey("image", config.data.providerId || "volc")) {
+    updateNode(configId, { error: "尚未配置火山方舟图片 API Key；图层分离不提供模拟结果。" });
+    showToast("请先在设置中配置火山方舟图片 API Key");
+    return;
+  }
+
+  updateNode(configId, { error: "", loading: true });
+  showProcessing("Seedream 正在识别主体并生成透明图层...");
+  try {
+    const source = await resolveImageForApi(sourceNode.data.url);
+    if (!source) throw new Error("原图读取失败");
+    const response = await requestLayerSeparation({ ...config, data: { ...config.data, model } }, source);
+    const parsed = window.SeedreamTools.parseLayerResponse(response);
+    const pendingLayerResponse = serializableLayerResponse(parsed);
+    if (pendingLayerResponse) updateNode(configId, { pendingLayerResponse, pendingLayerSourceRevision: sourceRevision });
+    const count = await materializeLayerGroup(config, sourceNode, parsed);
+    updateNode(configId, { executed: true, loading: false, error: "", pendingLayerResponse: null, pendingLayerSourceRevision: "" });
+    hideProcessing(`图层分离完成：背景 + ${count} 个透明图层`);
+  } catch (error) {
+    updateNode(configId, { loading: false, error: error.message || "图层分离失败" });
+    processing.hidden = true;
+    showToast(`图层分离失败：${error.message}`);
+  }
+}
+
+function layerGroupToImage(groupId) {
+  const group = getNode(groupId);
+  if (!group || group.type !== "layerGroup" || !group.data.url) return;
+  const imageId = addNode("image", { x: group.position.x + 410, y: group.position.y }, {
+    label: `${group.data.label || "图层组"} · 合成图`,
+    url: group.data.url,
+  });
+  addEdge(groupId, imageId, "output", { label: "合成图" });
+}
+
+function extractLayerAsImage(groupId, layerId) {
+  const group = getNode(groupId);
+  const layer = group?.data?.layers?.find((item) => item.id === layerId);
+  if (!group || !layer?.assetId) return;
+  const imageId = addNode("image", { x: group.position.x + 410, y: group.position.y + 80 }, {
+    label: layer.name || "提取图层",
+    url: `${imageAssetPrefix}${layer.assetId}`,
+  });
+  addEdge(groupId, imageId, "output", { label: layer.name || "提取图层" });
+  showToast(`已将「${layer.name || "图层"}」提取为图片节点`);
+}
+
+async function openLayerGroupEditor(groupId) {
+  const group = getNode(groupId);
+  if (!group || group.type !== "layerGroup" || !group.data.layers?.length) return;
+  const draft = typeof structuredClone === "function"
+    ? structuredClone(group.data)
+    : JSON.parse(JSON.stringify(group.data));
+  let selectedId = draft.selectedLayerId || draft.layers.find((layer) => layer.role !== "background")?.id || draft.layers[0].id;
+  const imageCache = new Map();
+  const overlay = document.createElement("div");
+  overlay.className = "layer-editor-overlay";
+  overlay.innerHTML = `
+    <section class="layer-editor-dialog" role="dialog" aria-modal="true" aria-label="图层编辑器">
+      <header class="layer-editor-head">
+        <div><strong>Seedream 图层编辑器</strong><small>${Math.round(draft.width)} × ${Math.round(draft.height)} · 移动、等比缩放、排序与透明度</small></div>
+        <button type="button" data-layer-action="close" aria-label="关闭">×</button>
+      </header>
+      <div class="layer-editor-body">
+        <div class="layer-editor-stage"><canvas></canvas></div>
+        <aside class="layer-editor-side">
+          <div class="layer-editor-side-title">图层</div>
+          <div class="layer-editor-list"></div>
+          <div class="layer-editor-inspector"></div>
+        </aside>
+      </div>
+      <footer class="layer-editor-foot">
+        <span>拖动图层移动；拖动四角控制点等比缩放</span>
+        <button type="button" class="node-secondary-button" data-layer-action="cancel">取消</button>
+        <button type="button" class="node-button" data-layer-action="apply">应用到画布</button>
+      </footer>
+    </section>`;
+  document.body.append(overlay);
+
+  const canvas = overlay.querySelector("canvas");
+  const ctx = canvas.getContext("2d");
+  const listEl = overlay.querySelector(".layer-editor-list");
+  const inspectorEl = overlay.querySelector(".layer-editor-inspector");
+  canvas.width = Math.max(1, Math.round(draft.width));
+  canvas.height = Math.max(1, Math.round(draft.height));
+
+  try {
+    await Promise.all(draft.layers.map(async (layer) => {
+      if (!layer.assetId || imageCache.has(layer.assetId)) return;
+      imageCache.set(layer.assetId, await loadCanvasImage(`${imageAssetPrefix}${layer.assetId}`));
+    }));
+  } catch (error) {
+    overlay.remove();
+    showToast(`图层资源加载失败：${error.message}`);
+    return;
+  }
+
+  const sortedTopFirst = () => [...draft.layers].sort((a, b) => Number(b.zIndex) - Number(a.zIndex));
+  const selectedLayer = () => draft.layers.find((layer) => layer.id === selectedId) || null;
+  const canvasPoint = (event) => {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left) * canvas.width / Math.max(1, rect.width),
+      y: (event.clientY - rect.top) * canvas.height / Math.max(1, rect.height),
+      tolerance: 12 * canvas.width / Math.max(1, rect.width),
+    };
+  };
+
+  function drawEditorCanvas() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (const layer of window.SeedreamTools.layerRenderPlan(draft.layers)) {
+      const image = imageCache.get(layer.assetId);
+      if (!image) continue;
+      ctx.globalAlpha = layer.opacity;
+      ctx.drawImage(image, Number(layer.x) || 0, Number(layer.y) || 0, Number(layer.width) || image.naturalWidth, Number(layer.height) || image.naturalHeight);
+    }
+    ctx.globalAlpha = 1;
+    const layer = selectedLayer();
+    if (!layer || layer.visible === false) return;
+    const x = Number(layer.x) || 0;
+    const y = Number(layer.y) || 0;
+    const width = Number(layer.width) || 1;
+    const height = Number(layer.height) || 1;
+    const handle = Math.max(7, canvas.width / 220);
+    ctx.save();
+    ctx.strokeStyle = "#8b5cf6";
+    ctx.lineWidth = Math.max(2, canvas.width / 800);
+    ctx.setLineDash([handle, handle * 0.7]);
+    ctx.strokeRect(x, y, width, height);
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#8b5cf6";
+    [[x, y], [x + width, y], [x, y + height], [x + width, y + height]].forEach(([hx, hy]) => {
+      ctx.fillRect(hx - handle, hy - handle, handle * 2, handle * 2);
+    });
+    ctx.restore();
+  }
+
+  function renderLayerPanel() {
+    listEl.innerHTML = sortedTopFirst().map((layer) => `
+      <div class="layer-editor-row ${layer.id === selectedId ? "active" : ""} ${layer.visible === false ? "muted" : ""}" data-layer-id="${escapeHtml(layer.id)}">
+        <button type="button" title="显示/隐藏" data-layer-op="visible">${layer.visible === false ? "◌" : "◉"}</button>
+        <button type="button" class="layer-editor-name" data-layer-op="select">${escapeHtml(layer.name || "未命名图层")}</button>
+        <button type="button" title="锁定" data-layer-op="lock" ${layer.role === "background" ? "disabled" : ""}>${layer.locked ? "🔒" : "◇"}</button>
+        <button type="button" title="上移" data-layer-op="up" ${layer.role === "background" ? "disabled" : ""}>↑</button>
+        <button type="button" title="下移" data-layer-op="down" ${layer.role === "background" ? "disabled" : ""}>↓</button>
+      </div>`).join("");
+    const layer = selectedLayer();
+    inspectorEl.innerHTML = layer ? `
+      <label>名称<input type="text" data-layer-field="name" value="${escapeHtml(layer.name || "")}"></label>
+      <label>不透明度 <b>${Math.round((Number(layer.opacity) || 0) * 100)}%</b><input type="range" min="0" max="1" step="0.01" data-layer-field="opacity" value="${Number(layer.opacity) || 0}"></label>
+      <div class="layer-editor-geometry">X ${Math.round(layer.x)} · Y ${Math.round(layer.y)} · ${Math.round(layer.width)} × ${Math.round(layer.height)}</div>
+      <button type="button" class="node-secondary-button" data-layer-action="extract" ${layer.assetId ? "" : "disabled"}>提取为图片节点</button>
+      ${layer.flags?.length ? `<small>提示：${escapeHtml(layer.flags.join(", "))}</small>` : ""}` : "";
+  }
+
+  function refreshEditor() {
+    drawEditorCanvas();
+    renderLayerPanel();
+  }
+
+  listEl.addEventListener("click", (event) => {
+    const row = event.target.closest("[data-layer-id]");
+    const operation = event.target.closest("[data-layer-op]")?.dataset.layerOp;
+    if (!row || !operation) return;
+    selectedId = row.dataset.layerId;
+    const layer = selectedLayer();
+    if (!layer) return;
+    if (operation === "visible") layer.visible = layer.visible === false;
+    if (operation === "lock" && layer.role !== "background") layer.locked = !layer.locked;
+    if (operation === "up") draft.layers = window.SeedreamTools.reorderLayer(draft.layers, layer.id, 1);
+    if (operation === "down") draft.layers = window.SeedreamTools.reorderLayer(draft.layers, layer.id, -1);
+    refreshEditor();
+  });
+
+  inspectorEl.addEventListener("input", (event) => {
+    const layer = selectedLayer();
+    if (!layer) return;
+    if (event.target.dataset.layerField === "name") layer.name = event.target.value;
+    if (event.target.dataset.layerField === "opacity") layer.opacity = Number(event.target.value);
+    drawEditorCanvas();
+    if (event.target.dataset.layerField === "opacity") {
+      const label = inspectorEl.querySelector("label b");
+      if (label) label.textContent = `${Math.round(layer.opacity * 100)}%`;
+    }
+  });
+
+  let drag = null;
+  canvas.addEventListener("pointerdown", (event) => {
+    const point = canvasPoint(event);
+    let layer = selectedLayer();
+    const hitLayer = [...sortedTopFirst()].find((candidate) => candidate.visible !== false
+      && point.x >= candidate.x && point.x <= candidate.x + candidate.width
+      && point.y >= candidate.y && point.y <= candidate.y + candidate.height);
+    const insideSelected = layer && point.x >= layer.x && point.x <= layer.x + layer.width && point.y >= layer.y && point.y <= layer.y + layer.height;
+    if (hitLayer && (!layer || layer.role === "background" || layer.visible === false || !insideSelected)) {
+      selectedId = hitLayer.id;
+      layer = hitLayer;
+      refreshEditor();
+    }
+    if (!layer || layer.locked) return;
+    const corners = {
+      nw: { x: layer.x, y: layer.y },
+      ne: { x: layer.x + layer.width, y: layer.y },
+      sw: { x: layer.x, y: layer.y + layer.height },
+      se: { x: layer.x + layer.width, y: layer.y + layer.height },
+    };
+    const corner = Object.entries(corners).find(([, value]) => Math.hypot(point.x - value.x, point.y - value.y) <= point.tolerance)?.[0] || "";
+    if (!corner && !(point.x >= layer.x && point.x <= layer.x + layer.width && point.y >= layer.y && point.y <= layer.y + layer.height)) return;
+    const opposite = { nw: "se", ne: "sw", sw: "ne", se: "nw" }[corner];
+    drag = {
+      mode: corner ? "resize" : "move",
+      corner,
+      startPoint: point,
+      startLayer: { ...layer },
+      anchor: opposite ? corners[opposite] : null,
+    };
+    canvas.setPointerCapture(event.pointerId);
+  });
+
+  canvas.addEventListener("pointermove", (event) => {
+    if (!drag) return;
+    const point = canvasPoint(event);
+    const index = draft.layers.findIndex((layer) => layer.id === selectedId);
+    if (index < 0) return;
+    if (drag.mode === "move") {
+      draft.layers[index] = window.SeedreamTools.moveLayer(drag.startLayer, point.x - drag.startPoint.x, point.y - drag.startPoint.y);
+    } else {
+      const startDistance = Math.hypot(drag.startPoint.x - drag.anchor.x, drag.startPoint.y - drag.anchor.y) || 1;
+      const currentDistance = Math.hypot(point.x - drag.anchor.x, point.y - drag.anchor.y);
+      draft.layers[index] = window.SeedreamTools.resizeLayerFromCorner(drag.startLayer, drag.corner, currentDistance / startDistance);
+    }
+    drawEditorCanvas();
+  });
+  const stopDrag = (event) => {
+    if (!drag) return;
+    drag = null;
+    try { canvas.releasePointerCapture(event.pointerId); } catch {}
+    refreshEditor();
+  };
+  canvas.addEventListener("pointerup", stopDrag);
+  canvas.addEventListener("pointercancel", stopDrag);
+
+  let onKeyDown = null;
+  const closeEditor = () => {
+    if (onKeyDown) document.removeEventListener("keydown", onKeyDown);
+    overlay.remove();
+  };
+  overlay.addEventListener("click", async (event) => {
+    const action = event.target.closest("[data-layer-action]")?.dataset.layerAction;
+    if (!action) return;
+    if (action === "close" || action === "cancel") closeEditor();
+    if (action === "extract") extractLayerAsImage(groupId, selectedId);
+    if (action === "apply") {
+      const button = event.target.closest("button");
+      button.disabled = true;
+      button.textContent = "正在合成...";
+      try {
+        draft.selectedLayerId = selectedId;
+        const dataUrl = await composeLayerGroupDataUrl(draft);
+        const sentinel = await persistCanvasDataUrl(dataUrl);
+        draft.compositeAssetId = getIndexedImageId(sentinel);
+        draft.url = sentinel;
+        commitHistory();
+        updateNode(groupId, draft);
+        closeEditor();
+        showToast("图层编辑已应用到画布");
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = "应用到画布";
+        showToast(`图层合成失败：${error.message}`);
+      }
+    }
+  });
+  onKeyDown = (event) => {
+    if (event.key !== "Escape") return;
+    closeEditor();
+  };
+  document.addEventListener("keydown", onKeyDown);
+  refreshEditor();
 }
 
 async function requestMjImageGeneration(configNode, prompt, refImages = []) {
@@ -5379,8 +6325,17 @@ function inferConnection(sourceId, targetId) {
     const label = existing === 0 ? "底图" : existing === 1 ? "脸源" : `参考图${existing + 1}`;
     return { type: "imageOrder", label };
   }
+  if (source?.type === "seedreamEdit" && target?.type === "image") return { type: "output", label: "编辑结果" };
+  if (target?.type === "seedreamEdit" && ["image", "layerGroup"].includes(source?.type)) {
+    const existing = state.edges.filter((edge) => edge.target === targetId && ["image", "layerGroup"].includes(getNode(edge.source)?.type)).length;
+    return { type: "imageOrder", label: existing === 0 ? "待编辑原图" : `参考图 ${existing + 1}` };
+  }
+  if (target?.type === "layerSeparation" && source?.type === "image") return { type: "imageOrder", label: "原图" };
+  if (source?.type === "layerSeparation" && target?.type === "layerGroup") return { type: "output", label: "图层文档" };
+  if (source?.type === "layerGroup" && target?.type === "image") return { type: "output", label: "合成图" };
+  if (source?.type === "layerGroup" && target?.type === "imageConfig") return { type: "imageOrder", label: "参考图" };
   if (target?.type === "videoConfig" && ["text", "llmConfig", "storyboardAssistant", "promptOptimizer"].includes(source?.type)) return { type: "promptOrder", label: "提示词" };
-  if (target?.type === "videoConfig" && source?.type === "image") return { type: "imageRole", label: "首帧" };
+  if (target?.type === "videoConfig" && ["image", "layerGroup"].includes(source?.type)) return { type: "imageRole", label: "首帧" };
   return { type: "default", label: "连接" };
 }
 
@@ -5412,6 +6367,8 @@ const connectionDropTargets = {
   ],
   image: [
     { type: "imageConfig", label: "+ 图片生成(用作参考图)" },
+    { type: "seedreamEdit", label: "+ Seedream 精确编辑" },
+    { type: "layerSeparation", label: "+ Seedream 智能图层分离" },
     { type: "templateImageConfig", label: "+ 营销物料(用作产品图)" },
     { type: "faceSwapConfig", label: "+ 换脸" },
     { type: "imageCompare", label: "+ 图片对比" },
@@ -5426,6 +6383,18 @@ const connectionDropTargets = {
   ],
   faceSwapConfig: [
     { type: "image", label: "+ 换脸结果" },
+  ],
+  seedreamEdit: [
+    { type: "image", label: "+ 精确编辑结果" },
+  ],
+  layerSeparation: [
+    { type: "layerGroup", label: "+ 可编辑图层组" },
+  ],
+  layerGroup: [
+    { type: "image", label: "+ 合成图片" },
+    { type: "imageConfig", label: "+ 图片生成(用作参考图)" },
+    { type: "seedreamEdit", label: "+ Seedream 精确编辑" },
+    { type: "videoConfig", label: "+ 视频生成(用作首帧)" },
   ],
   videoConfig: [
     { type: "video", label: "+ 视频结果" },
@@ -5523,6 +6492,23 @@ async function refreshNode(id) {
   }
   if (node.type === "faceSwapConfig") {
     generateFaceSwap(id);
+    return;
+  }
+  if (node.type === "seedreamEdit") {
+    generateSeedreamEdit(id);
+    return;
+  }
+  if (node.type === "layerSeparation") {
+    generateLayerSeparation(id);
+    return;
+  }
+  if (node.type === "layerGroup") {
+    try {
+      await refreshLayerGroupComposite(id);
+      showToast("图层组合成图已刷新");
+    } catch (error) {
+      showToast(`图层合成失败：${error.message}`);
+    }
     return;
   }
   if (node.type === "videoConfig") {
@@ -5761,6 +6747,22 @@ function createImageToImage(imageId) {
   showToast("已创建图生图工作流");
 }
 
+function createSeedreamPreciseEdit(imageId) {
+  const image = getNode(imageId);
+  if (!image) return;
+  const configId = addNode("seedreamEdit", { x: image.position.x + 340, y: image.position.y }, { label: "精确图片编辑" });
+  addEdge(imageId, configId, "imageOrder", { label: "待编辑原图" });
+  showToast("已创建 Seedream 精确编辑节点");
+}
+
+function createSeedreamLayerSeparation(imageId) {
+  const image = getNode(imageId);
+  if (!image || image.type !== "image") return;
+  const configId = addNode("layerSeparation", { x: image.position.x + 340, y: image.position.y }, { label: "智能图层分离" });
+  addEdge(imageId, configId, "imageOrder", { label: "原图" });
+  showToast("已创建 Seedream 智能图层分离节点");
+}
+
 function createImageToVideo(imageId) {
   const image = getNode(imageId);
   if (!image) return;
@@ -5960,6 +6962,8 @@ function renderContextMenu() {
     items.push({ action: "save-image", label: "保存图片" });
     items.push({ kind: "separator" });
     items.push({ action: "image-to-image", label: "创建图生图" });
+    items.push({ action: "seedream-precise-edit", label: "Seedream 精确编辑" });
+    items.push({ action: "seedream-layer-separation", label: "Seedream 智能图层分离" });
     items.push({ action: "image-to-video", label: "创建生视频" });
     if (nodeGroupId) items.push({ action: "remove-node-from-group", label: "移除群组" });
     return items.map(renderContextMenuItem).join("");
@@ -5996,7 +7000,13 @@ function renderContextMenu() {
     items.push({ action: "duplicate-node", label: "复制节点" });
     if (node.type === "image") {
       items.push({ action: "image-to-image", label: "创建图生图" });
+      items.push({ action: "seedream-precise-edit", label: "Seedream 精确编辑" });
+      items.push({ action: "seedream-layer-separation", label: "Seedream 智能图层分离" });
       items.push({ action: "image-to-video", label: "创建生视频" });
+    }
+    if (node.type === "layerGroup") {
+      items.push({ action: "open-layer-editor", label: "编辑图层" });
+      items.push({ action: "layer-group-to-image", label: "合成为图片" });
     }
     if (nodeGroupId) items.push({ action: "remove-node-from-group", label: "移除群组" });
     items.push({ kind: "separator" });
@@ -6013,6 +7023,8 @@ function renderContextMenu() {
   items.push({ action: "add-storyboard-config", label: "故事板生成" });
   items.push({ action: "add-template-image-config", label: "营销物料" });
   items.push({ action: "add-face-swap-config", label: "换脸" });
+  items.push({ action: "add-seedream-edit", label: "精确图片编辑" });
+  items.push({ action: "add-layer-separation", label: "智能图层分离" });
   items.push({ action: "add-video-config", label: "视频生成配置" });
   items.push({ action: "add-image", label: "图片节点" });
   items.push({ action: "add-image-compare", label: "图片对比" });
@@ -6043,6 +7055,10 @@ function handleContextAction(action) {
   if (action === "duplicate-node" && nodeId) duplicateNode(nodeId);
   if (action === "delete-node" && nodeId) removeNode(nodeId);
   if (action === "image-to-image" && nodeId) createImageToImage(nodeId);
+  if (action === "seedream-precise-edit" && nodeId) createSeedreamPreciseEdit(nodeId);
+  if (action === "seedream-layer-separation" && nodeId) createSeedreamLayerSeparation(nodeId);
+  if (action === "open-layer-editor" && nodeId) openLayerGroupEditor(nodeId);
+  if (action === "layer-group-to-image" && nodeId) layerGroupToImage(nodeId);
   if (action === "image-to-video" && nodeId) createImageToVideo(nodeId);
   if (action === "preview-image" && imageSource) openImagePreview(imageSource);
   if (action === "save-image" && imageSource) saveImageSource(imageSource);
@@ -6068,6 +7084,8 @@ function handleContextAction(action) {
     "add-storyboard-config": "storyboardConfig",
     "add-template-image-config": "templateImageConfig",
     "add-face-swap-config": "faceSwapConfig",
+    "add-seedream-edit": "seedreamEdit",
+    "add-layer-separation": "layerSeparation",
     "add-image-compare": "imageCompare",
     "add-image-expand": "imageExpand",
     "add-image": "image",
@@ -6706,8 +7724,15 @@ viewport.addEventListener("pointermove", (event) => {
     const node = getNode(drag.id);
     if (!node) return;
     const min = getMinNodeSize(node.type);
-    node.data.width = Math.round(clamp(drag.width + (event.clientX - drag.startX) / state.view.zoom, min.width, 900));
-    node.data.height = Math.round(clamp(drag.height + (event.clientY - drag.startY) / state.view.zoom, min.height, 900));
+    const width = Math.round(clamp(drag.width + (event.clientX - drag.startX) / state.view.zoom, min.width, 900));
+    const height = Math.round(clamp(drag.height + (event.clientY - drag.startY) / state.view.zoom, min.height, 900));
+    if (node.type === "layerGroup") {
+      node.data.nodeWidth = width;
+      node.data.nodeHeight = height;
+    } else {
+      node.data.width = width;
+      node.data.height = height;
+    }
     saveState();
     render();
     return;
@@ -7045,6 +8070,11 @@ document.addEventListener("click", async (event) => {
     if (nodeAction === "generate-template-image") generateTemplateImage(id);
     if (nodeAction === "generate-expand") generateImageExpand(id);
     if (nodeAction === "generate-faceswap") generateFaceSwap(id);
+    if (nodeAction === "open-seedream-editor") openSeedreamAnnotationEditor(id);
+    if (nodeAction === "generate-seedream-edit") generateSeedreamEdit(id);
+    if (nodeAction === "generate-layer-separation") generateLayerSeparation(id);
+    if (nodeAction === "open-layer-editor") openLayerGroupEditor(id);
+    if (nodeAction === "layer-group-to-image") layerGroupToImage(id);
     if (nodeAction === "generate-video") generateVideo(id);
     if (nodeAction === "image-to-image") createImageToImage(id);
     if (nodeAction === "image-to-video") createImageToVideo(id);
@@ -7135,6 +8165,8 @@ document.addEventListener("click", async (event) => {
   if (action === "add-storyboard-config") addNode("storyboardConfig");
   if (action === "add-template-image-config") addNode("templateImageConfig");
   if (action === "add-face-swap-config") addNode("faceSwapConfig");
+  if (action === "add-seedream-edit") addNode("seedreamEdit");
+  if (action === "add-layer-separation") addNode("layerSeparation");
   if (action === "add-image-compare") addNode("imageCompare");
   if (action === "add-image-expand") addNode("imageExpand");
   if (action === "add-model3d") addNode("model3dPreview");
@@ -7219,6 +8251,22 @@ function syncNodeFieldControl(control) {
       node.data.size = getImageSizeValue(node.data.model, node.data.size);
     }
   }
+  if (field === "model" && node.type === "seedreamEdit") {
+    node.data.providerId = "volc";
+    node.data.model = "doubao-seedream-5-0-pro-260628";
+    node.data.size = getImageSizeValue(node.data.model, node.data.size);
+    node.data.outputFormat = node.data.outputFormat === "jpeg" ? "jpeg" : "png";
+    node.data.promptOptimization = node.data.promptOptimization === "fast" ? "fast" : "standard";
+  }
+  if (field === "model" && node.type === "layerSeparation") {
+    node.data.providerId = "volc";
+    node.data.model = "doubao-seedream-5-0-pro-260628";
+    node.data.size = ["auto", "1K", "1.5K", "2K"].includes(node.data.size) ? node.data.size : "auto";
+    node.data.promptOptimization = node.data.promptOptimization === "fast" ? "fast" : "standard";
+  }
+  if (field === "seed" && node.type === "layerSeparation") {
+    node.data.seed = Math.max(0, Math.min(2147483647, Math.trunc(Number(value) || 0)));
+  }
   if (field === "model" && (node.type === "storyboardConfig" || node.type === "templateImageConfig")) {
     node.data.size = getImageSizeValue(node.data.model, node.data.size);
   }
@@ -7263,6 +8311,8 @@ function normalizeNodeModelValue(nodeType, value) {
   if (nodeType === "promptOptimizer") return normalizeModelValue("chat", value);
   if (nodeType === "imageConfig") return normalizeModelValue("image", value);
   if (nodeType === "templateImageConfig") return normalizeModelValue("image", value);
+  if (nodeType === "seedreamEdit") return normalizeModelValue("image", value);
+  if (nodeType === "layerSeparation") return normalizeModelValue("image", value);
   if (nodeType === "videoConfig") return normalizeModelValue("video", value);
   return value;
 }

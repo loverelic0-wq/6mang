@@ -9,8 +9,9 @@ loadDotEnv(path.join(rootDir, ".env"));
 const db = require("./db");
 const { createKlingCli, isKlingProvider } = require("./kling-cli");
 const { isCprtProvider, buildCprtCreatePayload, normalizeCprtTask } = require("./cprt-provider");
+const { imageReferences, selectImageUpstreamRequest } = require("./image-routing");
 
-const kling = createKlingCli({ rootDir });
+const kling = createKlingCli({ rootDir, errorLogPath: path.join(rootDir, "data", "kling-error.log") });
 
 const publicDir = path.join(rootDir, "public");
 const runtimeSettingsPath = path.join(rootDir, ".huobao-settings.json");
@@ -24,6 +25,7 @@ const modelCostRules = {
     "gpt-image-2": 15,
     "gemini-3-pro-image-preview": 10,
     "gemini-3.1-flash-image-preview": 6,
+    "doubao-seedream-5-0-pro-260628": 8,
     "midjourney": 15,
     "niji-journey": 15,
     default: 8,
@@ -205,6 +207,15 @@ const DEFAULT_PROVIDERS = {
         defaultModel: "gpt-image-2",
         models: [
           { id: "gpt-image-2", label: "GPT Image 2" },
+        ],
+      },
+      volc: {
+        label: "火山 Seedream",
+        baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+        apiKey: "",
+        defaultModel: "doubao-seedream-5-0-pro-260628",
+        models: [
+          { id: "doubao-seedream-5-0-pro-260628", label: "豆包 Seedream 5.0 Pro（火山引擎）" },
         ],
       },
     },
@@ -407,7 +418,15 @@ function getProvider(kind, providerId) {
     error.statusCode = 400;
     throw error;
   }
-  return { kind, id, ...item };
+  return { kind, id, ...item, apiKey: resolveProviderApiKey(kind, id, item) };
+}
+
+function resolveProviderApiKey(kind, id, item) {
+  if (item.apiKey) return item.apiKey;
+  if (kind === "image" && id === "volc") {
+    return runtimeSettings.providers?.video?.items?.volc?.apiKey || "";
+  }
+  return "";
 }
 
 async function publicProvidersStatus() {
@@ -444,8 +463,8 @@ async function publicProvidersStatus() {
         baseUrl: item.baseUrl,
         defaultModel: item.defaultModel,
         models: item.models,
-        configured: Boolean(item.apiKey),
-        apiKeyMasked: maskApiKey(item.apiKey),
+        configured: Boolean(resolveProviderApiKey(kind, id, item)),
+        apiKeyMasked: maskApiKey(resolveProviderApiKey(kind, id, item)),
       };
     }
     out[kind] = { default: group.default, items };
@@ -864,7 +883,7 @@ async function handleApi(req, res, url) {
     const body = await readJson(req);
     const provider = getProvider("image", body.providerId);
     const model = String(body.model || provider.defaultModel);
-    const refImages = Array.isArray(body.image) ? body.image.filter(Boolean) : [];
+    const refImages = imageReferences(body);
     if (isKlingProvider(provider)) {
       const data = await kling.submit({
         tool: refImages.length ? "image_to_image" : "text_to_image",
@@ -877,6 +896,7 @@ async function handleApi(req, res, url) {
       sendJson(res, 200, data);
       return;
     }
+    const upstreamRequest = isChatImageModel(model) ? null : selectImageUpstreamRequest(provider, body);
     const cost = costFor("image", model);
     db.adjustBalance({ userId: found.user.id, delta: -cost, type: "spend", description: `image ${model}` });
     try {
@@ -884,7 +904,7 @@ async function handleApi(req, res, url) {
       if (isChatImageModel(model)) {
         // gemini 香蕉系（如 147ai.com）不走 images 端点，改用 /chat/completions 对话生图
         data = await chatImageGenerate(provider, model, refImages, body);
-      } else if (refImages.length) {
+      } else if (upstreamRequest.mode === "multipart") {
         const form = new FormData();
         form.append("model", model);
         form.append("prompt", String(body.prompt || ""));
@@ -909,17 +929,11 @@ async function handleApi(req, res, url) {
           error.statusCode = 400;
           throw error;
         }
-        data = await n1nFetchForm(provider, "/images/edits", form);
+        data = await n1nFetchForm(provider, upstreamRequest.route, form);
       } else {
-        const payload = compactPayload({
-          ...body,
-          model,
-          prompt: body.prompt,
-        });
-        delete payload.providerId;
-        data = await n1nFetch(provider, "/images/generations", {
+        data = await n1nFetch(provider, upstreamRequest.route, {
           method: "POST",
-          body: payload,
+          body: upstreamRequest.payload,
         });
       }
       db.recordApiUsage({ userId: found.user.id, route: "images/generations", model, cost, status: "ok" });

@@ -4,7 +4,53 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
 const GENERATION_TOOLS = ["text_to_image", "image_to_image", "text_to_video", "image_to_video"];
+
+function isBlockedMediaHost(hostname) {
+  const host = String(hostname || "").toLowerCase();
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;
+  if (host === "0.0.0.0" || host === "::1" || host === "[::1]") return true;
+  if (/^127\./.test(host) || /^169\.254\./.test(host)) return true;
+  const parts = host.split(".").map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) return false;
+  const [a, b] = parts;
+  return a === 0 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+async function downloadRemoteImage(source, fetchImpl = fetch) {
+  let current;
+  try {
+    current = new URL(String(source || ""));
+  } catch {
+    throw new Error("可灵参考图地址无效");
+  }
+  for (let redirectCount = 0; redirectCount <= 3; redirectCount += 1) {
+    if (!["http:", "https:"].includes(current.protocol) || isBlockedMediaHost(current.hostname)) {
+      throw new Error("可灵参考图不允许访问本地或内网地址");
+    }
+    const response = await fetchImpl(current, {
+      headers: { Accept: "image/png,image/jpeg,image/webp,image/gif,image/*;q=0.8", "User-Agent": "6mang/0.1" },
+      redirect: "manual",
+      signal: AbortSignal.timeout(30000),
+    });
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      if (!location || redirectCount === 3) throw new Error("可灵参考图重定向次数过多");
+      current = new URL(location, current);
+      continue;
+    }
+    if (!response.ok) throw new Error(`可灵参考图下载失败：HTTP ${response.status}`);
+    const contentType = String(response.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    if (!/^image\/(?:png|jpeg|jpg|webp|gif)$/.test(contentType)) throw new Error("可灵参考图地址返回的不是受支持图片");
+    const declaredLength = Number(response.headers.get("content-length") || 0);
+    if (declaredLength > MAX_IMAGE_BYTES) throw new Error("可灵参考图超过 30MB 限制");
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > MAX_IMAGE_BYTES) throw new Error("可灵参考图超过 30MB 限制");
+    return { buffer, contentType };
+  }
+  throw new Error("可灵参考图下载失败");
+}
 
 function findCliScript(explicitPath = "") {
   const candidates = [
@@ -34,6 +80,15 @@ function parseQuietJson(stdout) {
   const error = new Error("可灵 CLI 未返回有效 JSON");
   error.statusCode = 502;
   throw error;
+}
+
+function summarizeCliStderr(stderr, exitCode) {
+  const lines = String(stderr || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const primary = lines.filter((line) => /(?:submit failed|提交失败)/i.test(line)).at(-1);
+  if (primary) return primary;
+  const contextIndex = lines.findIndex((line) => /(?:Check the parameters and inputs|请对照该模型的 who_am_i)/i.test(line));
+  const meaningful = contextIndex >= 0 ? lines.slice(0, contextIndex) : lines;
+  return meaningful.slice(-3).join("；") || lines.slice(-3).join("；") || `退出码 ${exitCode}`;
 }
 
 function unwrapBody(value) {
@@ -180,6 +235,8 @@ function createKlingCli(options = {}) {
   const cliScriptPath = findCliScript(options.cliScriptPath);
   const cwd = options.rootDir || path.resolve(__dirname, "..");
   const baseEnv = { ...process.env, ...(options.env || {}) };
+  const fetchImage = typeof options.fetchImage === "function" ? options.fetchImage : downloadRemoteImage;
+  const errorLogPath = options.errorLogPath ? path.resolve(options.errorLogPath) : "";
   const cacheTtlMs = Math.max(1000, Number(options.cacheTtlMs) || 5 * 60 * 1000);
   let cachedCapabilities = null;
   let capabilitiesCachedAt = 0;
@@ -255,7 +312,18 @@ function createKlingCli(options = {}) {
           return;
         }
         if (code !== 0) {
-          const detail = stderr.trim().split(/\r?\n/).filter(Boolean).slice(-3).join("；") || `退出码 ${code}`;
+          const detail = summarizeCliStderr(stderr, code);
+          if (errorLogPath) {
+            try {
+              fs.mkdirSync(path.dirname(errorLogPath), { recursive: true });
+              fs.appendFileSync(errorLogPath, `${JSON.stringify({
+                time: new Date().toISOString(),
+                command: String(args[0] || ""),
+                exitCode: code,
+                error: detail,
+              })}\n`);
+            } catch {}
+          }
           const error = new Error(`可灵 CLI 执行失败：${detail}`);
           error.statusCode = 502;
           finish(error);
@@ -341,24 +409,43 @@ function createKlingCli(options = {}) {
     }
   }
 
-  function materializeImages(images) {
+  async function materializeImages(images, inputSpecs = []) {
     let tempDir = "";
-    const values = images.map((source, index) => {
+    const values = [];
+    for (let index = 0; index < images.length; index += 1) {
+      const source = images[index];
       const value = String(source || "");
       const match = /^data:(image\/(?:png|jpeg|jpg|webp|gif));base64,([A-Za-z0-9+/=\s]+)$/i.exec(value);
-      if (!match) return value;
-      const buffer = Buffer.from(match[2].replace(/\s/g, ""), "base64");
-      if (buffer.length > 30 * 1024 * 1024) {
+      const requiresUpload = /file_upload/i.test(String(inputSpecs[index]?.description || ""));
+      let buffer;
+      let contentType = "";
+      if (match) {
+        contentType = match[1].toLowerCase();
+        buffer = Buffer.from(match[2].replace(/\s/g, ""), "base64");
+      } else if (requiresUpload && /^https?:\/\//i.test(value)) {
+        if (!fetchImage) {
+          const error = new Error(`第 ${index + 1} 张可灵参考图需要先通过 file_upload 上传`);
+          error.statusCode = 502;
+          throw error;
+        }
+        const fetched = await fetchImage(value);
+        buffer = Buffer.isBuffer(fetched?.buffer) ? fetched.buffer : Buffer.from(fetched?.buffer || []);
+        contentType = String(fetched?.contentType || "image/png").toLowerCase();
+      } else {
+        values.push(value);
+        continue;
+      }
+      if (buffer.length > MAX_IMAGE_BYTES) {
         const error = new Error(`第 ${index + 1} 张图片超过可灵 30MB 限制`);
         error.statusCode = 413;
         throw error;
       }
       if (!tempDir) tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "kling-canvas-"));
-      const ext = match[1].toLowerCase().includes("jpeg") || match[1].toLowerCase().includes("jpg") ? "jpg" : match[1].split("/")[1];
+      const ext = contentType.includes("jpeg") || contentType.includes("jpg") ? "jpg" : contentType.includes("webp") ? "webp" : contentType.includes("gif") ? "gif" : "png";
       const filePath = path.join(tempDir, `input-${index + 1}.${ext}`);
       fs.writeFileSync(filePath, buffer);
-      return filePath;
-    });
+      values.push(filePath);
+    }
     return {
       values,
       cleanup() {
@@ -371,7 +458,10 @@ function createKlingCli(options = {}) {
     const caps = await capabilities();
     const spec = findModelSpec(caps, request.tool, request.model);
     validateGeneration(request, spec);
-    const materialized = materializeImages(Array.isArray(request.images) ? request.images.filter(Boolean) : []);
+    const materialized = await materializeImages(
+      Array.isArray(request.images) ? request.images.filter(Boolean) : [],
+      spec.inputs,
+    );
     try {
       const args = buildGenerationArgs({
         ...request,
@@ -510,10 +600,12 @@ function createKlingCli(options = {}) {
 module.exports = {
   buildGenerationArgs,
   createKlingCli,
+  downloadRemoteImage,
   findCliScript,
   isKlingProvider,
   normalizeCapabilities,
   normalizeTask,
   parseQuietJson,
+  summarizeCliStderr,
   usesCanvasBilling,
 };
