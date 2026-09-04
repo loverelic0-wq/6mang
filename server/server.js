@@ -9,7 +9,8 @@ loadDotEnv(path.join(rootDir, ".env"));
 const db = require("./db");
 const { createKlingCli, isKlingProvider } = require("./kling-cli");
 const { isCprtProvider, buildCprtCreatePayload, normalizeCprtTask } = require("./cprt-provider");
-const { imageReferences, selectImageUpstreamRequest } = require("./image-routing");
+const { imageReferences, isGptImage2Model, selectImageUpstreamRequest } = require("./image-routing");
+const { requestText } = require("./upstream-http");
 
 const kling = createKlingCli({ rootDir, errorLogPath: path.join(rootDir, "data", "kling-error.log") });
 
@@ -18,6 +19,7 @@ const runtimeSettingsPath = path.join(rootDir, ".huobao-settings.json");
 const port = Number(process.env.PORT || 8787);
 const host = process.env.HOST || "127.0.0.1";
 const adminToken = process.env.ADMIN_TOKEN || "";
+const GPT_IMAGE_2_TIMEOUT_MS = 15 * 60 * 1000;
 
 const modelCostRules = {
   chat: { default: 1 },
@@ -929,11 +931,14 @@ async function handleApi(req, res, url) {
           error.statusCode = 400;
           throw error;
         }
-        data = await n1nFetchForm(provider, upstreamRequest.route, form);
+        data = await n1nFetchForm(provider, upstreamRequest.route, form, {
+          timeoutMs: isGptImage2Model(model) ? GPT_IMAGE_2_TIMEOUT_MS : 0,
+        });
       } else {
         data = await n1nFetch(provider, upstreamRequest.route, {
           method: "POST",
           body: upstreamRequest.payload,
+          timeoutMs: isGptImage2Model(model) ? GPT_IMAGE_2_TIMEOUT_MS : 0,
         });
       }
       db.recordApiUsage({ userId: found.user.id, route: "images/generations", model, cost, status: "ok" });
@@ -1678,19 +1683,59 @@ async function chatImageGenerate(provider, model, refImages, body) {
   return { data: [{ url }] };
 }
 
-async function n1nFetchForm(provider, route, form) {
+function wrapUpstreamNetworkError(provider, error, timeoutMs) {
+  const code = String(error?.code || error?.cause?.code || "");
+  const label = provider?.label || provider?.id || "图片上游";
+  let message;
+  if (code === "UPSTREAM_TIMEOUT") {
+    message = `上游「${label}」等待超过 ${Math.round(timeoutMs / 60000)} 分钟，生成已中止`;
+  } else if (code === "ECONNREFUSED") {
+    message = `无法连接上游「${label}」（连接被拒绝）`;
+  } else if (code === "ENOTFOUND" || code === "EAI_AGAIN") {
+    message = `无法解析上游「${label}」的网络地址`;
+  } else {
+    message = `上游「${label}」网络连接失败${code ? `（${code}）` : ""}`;
+  }
+  const wrapped = new Error(message);
+  wrapped.statusCode = code === "UPSTREAM_TIMEOUT" ? 504 : 502;
+  wrapped.cause = error;
+  return wrapped;
+}
+
+async function n1nFetchForm(provider, route, form, options = {}) {
   ensureProvider(provider);
 
-  const response = await fetch(`${provider.baseUrl.replace(/\/$/, "")}${route}`, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${provider.apiKey}`,
-    },
-    body: form,
-  });
-
-  const text = await response.text();
+  let response;
+  let text;
+  if (options.timeoutMs) {
+    const encoded = new Response(form);
+    const body = Buffer.from(await encoded.arrayBuffer());
+    try {
+      response = await requestText(`${provider.baseUrl.replace(/\/$/, "")}${route}`, {
+        method: "POST",
+        timeoutMs: options.timeoutMs,
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${provider.apiKey}`,
+          "Content-Type": encoded.headers.get("content-type"),
+        },
+        body,
+      });
+      text = response.text;
+    } catch (error) {
+      throw wrapUpstreamNetworkError(provider, error, options.timeoutMs);
+    }
+  } else {
+    response = await fetch(`${provider.baseUrl.replace(/\/$/, "")}${route}`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${provider.apiKey}`,
+      },
+      body: form,
+    });
+    text = await response.text();
+  }
   let data;
   try {
     data = text ? JSON.parse(text) : null;
@@ -1710,17 +1755,34 @@ async function n1nFetchForm(provider, route, form) {
 async function n1nFetch(provider, route, options = {}) {
   ensureProvider(provider);
 
-  const response = await fetch(`${provider.baseUrl.replace(/\/$/, "")}${route}`, {
-    method: options.method || "GET",
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${provider.apiKey}`,
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-    },
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
-
-  const text = await response.text();
+  const requestBody = options.body ? JSON.stringify(options.body) : undefined;
+  const headers = {
+    Accept: "application/json",
+    Authorization: `Bearer ${provider.apiKey}`,
+    ...(options.body ? { "Content-Type": "application/json" } : {}),
+  };
+  let response;
+  let text;
+  if (options.timeoutMs) {
+    try {
+      response = await requestText(`${provider.baseUrl.replace(/\/$/, "")}${route}`, {
+        method: options.method || "GET",
+        headers,
+        body: requestBody,
+        timeoutMs: options.timeoutMs,
+      });
+      text = response.text;
+    } catch (error) {
+      throw wrapUpstreamNetworkError(provider, error, options.timeoutMs);
+    }
+  } else {
+    response = await fetch(`${provider.baseUrl.replace(/\/$/, "")}${route}`, {
+      method: options.method || "GET",
+      headers,
+      body: requestBody,
+    });
+    text = await response.text();
+  }
   let data;
   try {
     data = text ? JSON.parse(text) : null;

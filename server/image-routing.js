@@ -1,3 +1,5 @@
+const { assertSize: assertGptImage2Size } = require("../public/gpt-image-2-sizes");
+
 function compactPayload(payload) {
   return Object.fromEntries(Object.entries(payload || {}).filter(([, value]) => value !== undefined));
 }
@@ -15,10 +17,18 @@ function isSeedream5ProModel(model) {
   return /^(?:doubao-|dola-)?seedream-5-0-pro-\d+$/i.test(String(model || ""));
 }
 
+function isGptImage2Model(model) {
+  return String(model || "").trim().toLowerCase() === "gpt-image-2";
+}
+
 function selectImageUpstreamRequest(provider, body = {}) {
   const model = String(body.model || provider?.defaultModel || "");
   const refs = imageReferences(body);
   const basePayload = compactPayload({ ...body, providerId: undefined, model });
+
+  if (isGptImage2Model(model) && body.size !== undefined) {
+    assertGptImage2Size(body.size);
+  }
 
   if (body.layer_decomposition) {
     if (!isVolcArkProvider(provider)) {
@@ -71,5 +81,6 @@ module.exports = {
   imageReferences,
   isVolcArkProvider,
   isSeedream5ProModel,
+  isGptImage2Model,
   selectImageUpstreamRequest,
 };
