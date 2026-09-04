@@ -1035,20 +1035,25 @@ async function handleApi(req, res, url) {
       if (isCprtProvider(provider) && Array.isArray(body.images) && body.images.length) {
         body.images = await Promise.all(body.images.map((v) => ensurePublicMediaUrl(v, "image")));
       }
-      const data = isCprtProvider(provider)
-        ? await n1nFetch(provider, "/chat/asyncTask", {
+      let data;
+      if (isCprtProvider(provider)) {
+        const raw = await n1nFetch(provider, "/chat/asyncTask", {
             method: "POST",
             body: buildCprtCreatePayload(model, body),
-          })
-        : isVolcArkProvider(provider)
-        ? await n1nFetch(provider, "/contents/generations/tasks", {
+          });
+        data = normalizeCprtTask(raw);
+        if (!data.id) throw new Error("智算谷创建响应未返回任务 ID");
+      } else if (isVolcArkProvider(provider)) {
+        data = await n1nFetch(provider, "/contents/generations/tasks", {
             method: "POST",
             body: volcVideoCreatePayload(model, body),
-          })
-        : await n1nFetch(provider, "/video/create", {
+          });
+      } else {
+        data = await n1nFetch(provider, "/video/create", {
             method: "POST",
             body: buildVideoCreatePayload(model, body),
           });
+      }
       db.recordApiUsage({ userId: found.user.id, route: "video/create", model, cost, status: "ok" });
       sendJson(res, 200, data);
     } catch (error) {
@@ -1345,7 +1350,7 @@ function volcVideoCreatePayload(model, body) {
   return compactPayload({
     model,
     content,
-    resolution: volcResolution(body.size),
+    resolution: body.resolution || volcResolution(body.size),
     // 前端直接传宽高比（含 adaptive=跟随参考图）；旧 body 兜底
     ratio: body.ratio || body.aspect_ratio || sizeToAspectRatio(body.size) || "16:9",
     duration: Math.max(4, Math.min(15, seconds)),

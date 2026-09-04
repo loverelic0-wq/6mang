@@ -108,4 +108,8 @@ quick-start.cmd  # Windows 快速启动脚本
 - API Key：你的 CPRT Key
 - 模型：例如 `free-video-2.5-multimodal-video`（也可按智算谷当前模型表添加更多模型）
 
-画布会自动识别 `cprt.xyz` 地址，改用 CPRT 的异步创建/查询协议；文本、连接的参考图片与参考视频会被转换为多模态输入。若素材来自本地节点，CPRT 需要其可从公网下载：请在 `.env` 配置 `COS_*`，画布会在提交前上传并使用临时签名 URL。普通远程 HTTPS 素材无需额外处理。
+画布会自动识别 `cprt.xyz` 地址，改用 CPRT 的异步创建/查询协议。两种输入模式使用不同的官方合同：首尾帧把所选 free-video multimodal 模型切换到同版本的 image-to-video 路由，并提交 `firstFrameUrl` / `lastFrameUrl`；“智能多参（全能参考）”按扁平 multimodal 合同提交 `imageUrls`（最多 9 张）和 `videoUrls`（最多 3 个）。两者都会传递 `prompt`、`resolution`、`generateAudio`、`realPersonMode`、`conversionSlots`、`returnLastFrame`、`seed` 与 `returnOriginData`，素材顺序与画布连线顺序一致。其他使用 `content[]` 的 CPRT 视频模型仍保留原协议。
+
+CPRT 查询采用 10 秒注册缓冲和最长约 20 分钟的轮询窗口；短暂的“任务不存在”、限流或网关错误会自动重试。若窗口结束时任务仍未完成，输出节点保留任务 ID 并显示“继续查询”，不会重新创建或重复扣费；上游确认失败时则直接显示真实错误。
+
+若素材来自本地节点，CPRT 需要其可从公网下载：请在 `.env` 配置 `COS_*`，画布会在提交前上传并使用临时签名 URL。普通远程 HTTPS 素材无需额外处理。

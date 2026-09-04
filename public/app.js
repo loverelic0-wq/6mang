@@ -752,8 +752,9 @@ const videoSecondsMin = 4;
 const videoSecondsMax = 15;
 // 火山 Seedance 支持的宽高比（adaptive = 跟随参考图）
 const videoAspectOptions = ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "adaptive"];
+const videoResolutionOptions = ["480p", "720p", "1080p"];
 // 输入模式：首尾帧 / 全能参考（智能多帧需视频输入做长视频拼接，暂未支持）
-const videoModeOptions = [["first_last", "首尾帧"], ["reference", "全能参考"]];
+const videoModeOptions = [["first_last", "首尾帧"], ["reference", "智能多参（全能参考）"]];
 
 // 取当前宽高比：node.data.ratio 优先；旧画布只有像素 size 时按比例吸附；默认 16:9
 function getVideoRatioValue(data) {
@@ -767,6 +768,16 @@ function getVideoRatioValue(data) {
 function getVideoMode(data) {
   const mode = String(data?.videoMode || "");
   return videoModeOptions.some(([k]) => k === mode) ? mode : "reference";
+}
+
+function getVideoResolutionValue(data) {
+  const resolution = String(data?.resolution || "").trim().toLowerCase();
+  if (videoResolutionOptions.includes(resolution)) return resolution;
+  const match = String(data?.size || "").match(/(\d+)\s*[x×]\s*(\d+)/);
+  const shortEdge = match ? Math.min(Number(match[1]), Number(match[2])) : 0;
+  if (shortEdge >= 1080) return "1080p";
+  if (shortEdge > 0 && shortEdge < 720) return "480p";
+  return "720p";
 }
 
 // 宽高比 → CSS aspect-ratio（adaptive 等无法解析的回退 16/9）
@@ -796,7 +807,7 @@ const nodeSizes = {
   promptOptimizer: { width: 320, height: 280 },
   imageConfig: { width: 300, height: 260 },
   image: { width: 260, height: 350 },
-  videoConfig: { width: 300, height: 250 },
+  videoConfig: { width: 300, height: 280 },
   video: { width: 300, height: 250 },
   storyboardConfig: { width: 360, height: 520 },
   templateImageConfig: { width: 320, height: 360 },
@@ -864,7 +875,7 @@ function defaultState() {
         id: videoConfigId,
         type: "videoConfig",
         position: { x: 430, y: 430 },
-        data: { label: "视频生成", model: getDefaultModel("video"), videoMode: "reference", ratio: "16:9", seconds: 8, executed: true },
+        data: { label: "视频生成", model: getDefaultModel("video"), videoMode: "reference", ratio: "16:9", resolution: "720p", seconds: 8, executed: true },
       },
       {
         id: videoId,
@@ -3144,6 +3155,7 @@ function renderNodeBody(node) {
       videoModeOptions.map(([k, l]) => `<option value="${k}" ${k === mode ? "selected" : ""}>${l}</option>`).join("")
     }<option value="multi_frame" disabled>智能多帧（即将支持）</option></select>`;
     const ratioValue = getVideoRatioValue(node.data);
+    const resolution = getVideoResolutionValue(node.data);
     const seconds = clamp(Number(node.data.seconds) || 8, videoSecondsMin, videoSecondsMax);
     const refIndicators = mode === "first_last"
       ? `
@@ -3163,6 +3175,7 @@ function renderNodeBody(node) {
     const legacyParams = `
       <div class="node-row"><span>模式</span>${modeSelect}</div>
       <div class="node-row"><span>比例</span><select data-field="ratio">${options(videoAspectOptions, ratioValue)}</select></div>
+      <div class="node-row"><span>分辨率</span><select data-field="resolution">${options(videoResolutionOptions, resolution)}</select></div>
       <div class="node-row"><span>时长</span><input type="range" class="node-range" data-field="seconds" min="${videoSecondsMin}" max="${videoSecondsMax}" step="1" value="${seconds}"><b data-range-label="seconds">${seconds}s</b></div>
       <div class="node-tip">${modeTip}</div>`;
     return `
@@ -3365,6 +3378,16 @@ function renderNodeBody(node) {
         </div>`;
     } else if (node.data.url) {
       media = `<div class="video-preview" style="aspect-ratio:${aspect};--preview-bg:${node.data.gradient || ""}"></div>`;
+    } else if (node.data.taskId) {
+      const detail = node.data.error || "任务已经创建，可以继续查询生成状态";
+      media = `
+        <div class="empty-media error-media">
+          <div>
+            <strong>${node.data.error ? "查询暂时中断" : "任务待查询"}</strong>
+            <div class="image-drop-hint">${escapeHtml(detail)}</div>
+            <button class="node-secondary-button" data-node-action="resume-video-task">继续查询</button>
+          </div>
+        </div>`;
     } else {
       media = `
         <div class="empty-media image-drop-target" data-node-action="upload-video">
@@ -4702,7 +4725,7 @@ function addNode(type, position = getViewportCenter(), data = {}) {
       layers: [],
     },
     model3dPreview: { label: "3D 模型预览", url: false, modelAssetId: "", modelName: "", modelFormat: "", renderMode: "clay", view: null },
-    videoConfig: { label: "视频生成", model: getDefaultModel("video"), videoMode: "reference", ratio: "16:9", seconds: 8 },
+    videoConfig: { label: "视频生成", model: getDefaultModel("video"), videoMode: "reference", ratio: "16:9", resolution: "720p", seconds: 8 },
     video: { label: "视频节点", url: false },
     storyboardConfig: {
       label: "故事板生成",
@@ -4882,7 +4905,10 @@ async function apiFetch(path, options = {}) {
     if (response.status === 402) {
       void refreshAuthUser();
     }
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    error.statusCode = response.status;
+    throw error;
   }
   if (response.ok && path.startsWith("/api/") && !path.startsWith("/api/auth/") && !path.startsWith("/api/billing/")) {
     void refreshAuthUser();
@@ -5411,6 +5437,7 @@ async function requestVideoCreate(configNode, prompt, images = [], videos = []) 
       ...(klingParams ? { dynamicParams: klingParams } : {}),
       videoMode: getVideoMode(configNode.data),
       ratio: getVideoRatioValue(configNode.data),
+      resolution: getVideoResolutionValue(configNode.data),
       seconds: clamp(Number(configNode.data.seconds) || 8, videoSecondsMin, videoSecondsMax),
       ...(images.length ? { images } : {}),
       ...(videos.length ? { videos } : {}),
@@ -6872,6 +6899,11 @@ function updateConnectionPreview(clientX, clientY) {
 async function generateVideo(configId) {
   const config = getNode(configId);
   if (!config) return;
+  const runningOutput = findOutputVideoNode(configId);
+  if (runningOutput?.data?.loading && runningOutput.data.taskId) {
+    showToast("已有视频任务在生成，请勿重复提交");
+    return;
+  }
   let ratio = getVideoRatioValue(config.data);
   const klingContext = klingContextForNode(config, "video");
   if (klingContext && window.KlingProvider?.videoRatioForSpec) {
@@ -6922,19 +6954,76 @@ async function generateVideo(configId) {
     updateNode(configId, { executed: true });
     hideProcessing("视频任务已完成");
   } catch (error) {
-    updateNode(videoId, { label: "生成失败", loading: false, error: error.message });
-    processing.hidden = true;
-    showToast(`视频生成失败：${error.message}`);
+    handleVideoPollingError(videoId, error);
+  }
+}
+
+function videoProviderForPolling(providerId = "") {
+  const group = backendConfig.providers?.video;
+  if (!group) return null;
+  const resolvedId = providerId && group.items?.[providerId] ? providerId : group.default;
+  return group.items?.[resolvedId] || null;
+}
+
+function handleVideoPollingError(videoId, error) {
+  const pending = Boolean(error?.pollingPending);
+  updateNode(videoId, {
+    label: pending ? "视频仍在生成" : "生成失败",
+    loading: false,
+    error: error.message,
+  });
+  processing.hidden = true;
+  showToast(`${pending ? "视频任务仍在生成" : "视频生成失败"}：${error.message}`);
+}
+
+async function resumeVideoTask(videoId) {
+  const videoNode = getNode(videoId);
+  const taskId = String(videoNode?.data?.taskId || "");
+  if (!taskId) {
+    showToast("该视频节点没有可查询的任务 ID");
+    return;
+  }
+  const providerId = videoNode.data.providerId || "";
+  updateNode(videoId, { label: "视频生成中...", loading: true, error: "" });
+  showProcessing("正在继续查询已有视频任务...");
+  try {
+    await pollVideoTask(videoId, taskId, providerId);
+    const config = incomingNodes(videoId, ["videoConfig"])[0];
+    if (config) updateNode(config.id, { executed: true });
+    hideProcessing("视频任务已完成");
+  } catch (error) {
+    handleVideoPollingError(videoId, error);
   }
 }
 
 async function pollVideoTask(videoId, taskId, providerId = "") {
-  const maxAttempts = providerId === "kling-cli" ? 180 : 24;
+  const provider = videoProviderForPolling(providerId);
+  const policy = window.VideoPolling?.policyFor(providerId, provider)
+    || { initialDelayMs: 0, intervalMs: 5000, maxAttempts: providerId === "kling-cli" ? 180 : 24 };
+  if (policy.initialDelayMs > 0) {
+    processingText.textContent = "视频任务已创建，等待上游登记...";
+    await new Promise((resolve) => setTimeout(resolve, policy.initialDelayMs));
+  }
+  let lastTransientError = "";
+  const maxAttempts = policy.maxAttempts;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     processingText.textContent = `视频生成中，正在查询任务... ${attempt + 1}/${maxAttempts}`;
-    const result = await requestVideoQuery(taskId, providerId);
+    let result;
+    try {
+      result = await requestVideoQuery(taskId, providerId);
+      lastTransientError = "";
+    } catch (error) {
+      if (!window.VideoPolling?.isRetryableError(error)) throw error;
+      lastTransientError = error.message;
+      processingText.textContent = `上游任务正在登记或繁忙，稍后重试... ${attempt + 1}/${maxAttempts}`;
+      if (attempt < maxAttempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, policy.intervalMs));
+        continue;
+      }
+      break;
+    }
     if (result?.video_url) {
-      updateNode(videoId, { label: "视频生成结果", loading: false, url: result.video_url, taskId, gradient: generateGradient(taskId) });
+      updateNode(videoId, { label: "视频生成结果", loading: false, url: result.video_url, taskId, gradient: generateGradient(taskId), error: "" });
       const videoNode = getNode(videoId);
       const saved = await recordProjectHistory({ type: "video", url: result.video_url, prompt: "", model: videoNode?.data?.model || "" });
       // 上游视频链接会过期；落盘成功后切到持久的本地回流地址，刷新画布后仍可播放。
@@ -6944,10 +7033,15 @@ async function pollVideoTask(videoId, taskId, providerId = "") {
     if (["failed", "error", "canceled", "cancelled"].includes(String(result?.status || "").toLowerCase())) {
       throw new Error(result?.error || `任务状态：${result.status}`);
     }
-    await new Promise((resolve) => setTimeout(resolve, 5000));
+    if (attempt < maxAttempts - 1) {
+      await new Promise((resolve) => setTimeout(resolve, policy.intervalMs));
+    }
   }
-  updateNode(videoId, { label: "视频生成中...", loading: true, taskId });
-  throw new Error("任务仍在生成中，请稍后通过任务 ID 查询");
+  const error = new Error(lastTransientError
+    ? `任务暂时无法查询（${lastTransientError}），请稍后继续查询`
+    : "任务仍在生成中，请稍后继续查询");
+  error.pollingPending = true;
+  throw error;
 }
 
 function createImageToImage(imageId) {
@@ -8377,6 +8471,7 @@ document.addEventListener("click", async (event) => {
     if (nodeAction === "open-layer-editor") openLayerGroupEditor(id);
     if (nodeAction === "layer-group-to-image") layerGroupToImage(id);
     if (nodeAction === "generate-video") generateVideo(id);
+    if (nodeAction === "resume-video-task") resumeVideoTask(id);
     if (nodeAction === "image-to-image") createImageToImage(id);
     if (nodeAction === "image-to-video") createImageToVideo(id);
     if (nodeAction === "edit-image") openImageEditor(id);
