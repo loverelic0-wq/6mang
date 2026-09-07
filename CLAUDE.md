@@ -151,7 +151,9 @@ try {
 | `storyboardConfig` | 故事板生成 | `generateStoryboard`，会展开多帧 |
 | `faceSwapConfig` | 换脸 | `generateFaceSwap`；接两张图片，按连线顺序 ①底图(保留)/②脸源(取脸)；指令式编辑（复用 `/api/images/generations` 多参考图 + `FACE_SWAP_PROMPT`，让模型在底图光照下重生成脸而非抠图粘贴），输出尺寸用 `nearestByAspect` 跟随底图比例；零后端改动，按 image 费率计费 |
 | `styleTransferConfig` | 风格迁移 | `generateStyleTransfer`；严格接两张图片，按连线顺序 ①内容图(保留主体/构图)/②风格参考(只取画风)；轻度/标准/强烈三档提示词由 `public/style-transfer.js` 生成，输出比例跟随内容图；复用现有图片生成、鉴权、计费、失败退款与历史归档链路 |
+| `materialTransferConfig` | 材质迁移 | `generateMaterialTransfer`；严格接两路素材，按连线顺序 ①主体/结构(锁定形体、视角、细节与场景)/②材质参考(只取颜色、纹理、粗糙度、光泽、反射与透光等材质属性)；轻度/标准/强烈三档提示词由 `public/material-transfer.js` 生成，输出比例跟随主体输入；支持图片、图层组和 3D 模型预览截图，复用现有图片生成、鉴权、计费、失败退款与历史归档链路 |
 | `seedreamEdit` | 精确图片编辑 | Seedream 5.0 Pro 专用；空间标注 + 最多 10 图参考编辑 |
+| `productBackgroundConfig` | 产品换背景 | `generateProductBackground`；双图直接编辑，一次完成背景替换与光影统一。输入可节点内上传或连线；`public/product-background.js` 按边标签“产品图/背景图”固定角色，普通无角色连线按顺序填空位。请求始终产品在前、背景在后；比例可跟随任一输入。复用现有鉴权、计费、编辑接口和结果/历史存储；没有抠图、mask 或本地模拟结果。运行集合防止同一节点重复提交，异常后释放重试。 |
 | `layerSeparation` | 智能图层分离 | Seedream 5.0 Pro 原生图层分离配置；只接单图 |
 | `layerGroup` | 图层组 | IndexedDB 图层文档；支持移动、等比缩放、排序、显隐、锁定、透明度、重命名、合成与提取 |
 | `videoConfig` | 视频生成配置 | `generateVideo` |

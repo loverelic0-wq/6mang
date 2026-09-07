@@ -685,7 +685,7 @@ function findProviderForModel(kind, modelId) {
 }
 
 function ensureNodeProvider(node) {
-  const kindMap = { llmConfig: "chat", storyboardAssistant: "chat", promptOptimizer: "chat", imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", styleTransferConfig: "image", faceSwapConfig: "image", seedreamEdit: "image", layerSeparation: "image", videoConfig: "video" };
+  const kindMap = { llmConfig: "chat", storyboardAssistant: "chat", promptOptimizer: "chat", imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", styleTransferConfig: "image", materialTransferConfig: "image", productBackgroundConfig: "image", faceSwapConfig: "image", seedreamEdit: "image", layerSeparation: "image", videoConfig: "video" };
   const kind = kindMap[node.type];
   if (!kind) return;
   if (node.type === "seedreamEdit" || node.type === "layerSeparation") {
@@ -814,6 +814,8 @@ const nodeSizes = {
   imageCompare: { width: 320, height: 320 },
   imageExpand: { width: 320, height: 400 },
   styleTransferConfig: { width: 320, height: 310 },
+  materialTransferConfig: { width: 330, height: 350 },
+  productBackgroundConfig: { width: 340, height: 380 },
   faceSwapConfig: { width: 300, height: 250 },
   seedreamEdit: { width: 330, height: 420 },
   layerSeparation: { width: 320, height: 330 },
@@ -1595,7 +1597,7 @@ async function saveSettingsDraft() {
 // ===== 快速切换 API 平台 =====
 const NODE_KIND_MAP_CLIENT = {
   llmConfig: "chat", storyboardAssistant: "chat", promptOptimizer: "chat",
-  imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", styleTransferConfig: "image", faceSwapConfig: "image", seedreamEdit: "image", layerSeparation: "image",
+  imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", styleTransferConfig: "image", materialTransferConfig: "image", productBackgroundConfig: "image", faceSwapConfig: "image", seedreamEdit: "image", layerSeparation: "image",
   videoConfig: "video",
 };
 
@@ -3030,6 +3032,57 @@ function renderNodeBody(node) {
     `;
   }
 
+  if (node.type === "materialTransferConfig") {
+    const slots = getImageReferenceSlots(node.id);
+    const structureConnected = Boolean(slots[0]?.node?.data?.url);
+    const materialConnected = Boolean(slots[1]?.node?.data?.url);
+    const ready = slots.length === 2 && structureConnected && materialConnected;
+    const inputError = slots.length > 2 ? "只接受两张图片，请删除多余的参考图连线。" : "";
+    const strength = window.MaterialTransfer.normalizeStrength(node.data.strength);
+    return `
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", node.data.providerId, node.data.model, "image_to_image")}</select></div>
+      <div class="node-row"><span>迁移强度</span><select data-field="strength">${optionPairs(window.MaterialTransfer.strengthOptions, strength)}</select></div>
+      <div class="node-row"><span>材质说明</span><input type="text" data-field="materialHint" placeholder="可留空自动识别。例：温润半透明白玉" value="${escapeHtml(node.data.materialHint || "")}"></div>
+      <div class="node-row"><span>额外要求</span><input type="text" data-field="extra" placeholder="可留空。例：只替换盔甲，皮肤不变" value="${escapeHtml(node.data.extra || "")}"></div>
+      <div class="node-indicators material-transfer-slots">
+        <span class="indicator ${structureConnected ? "ready" : ""}">①主体 / 结构 ${structureConnected ? "✓" : "○"}</span>
+        <span class="indicator ${materialConnected ? "ready" : ""}">②材质参考 ${materialConnected ? "✓" : "○"}</span>
+      </div>
+      <div class="node-tip">第1张锁定主体、视角和细节，第2张只提供材质；输出比例跟随第1张。</div>
+      ${inputError ? `<div class="node-inline-error">${escapeHtml(inputError)}</div>` : ""}
+      <button class="node-button" data-node-action="generate-material-transfer" ${ready ? "" : "disabled"}>迁移材质</button>
+    `;
+  }
+
+  if (node.type === "productBackgroundConfig") {
+    const slots = getImageReferenceSlots(node.id);
+    const { product, background, extras } = window.ProductBackground.assignInputs(slots);
+    let inputError = "";
+    let ready = false;
+    try { window.ProductBackground.validateInputs(slots); ready = true; } catch (error) { if (extras.length) inputError = error.message; }
+    const busy = activeProductBackgroundRuns.has(node.id);
+    const renderSlot = (slot, role, label) => {
+      const source = slot?.node?.data?.url;
+      const loaded = typeof source === "string" && source && !slot.node.data.loading;
+      return `<button class="product-background-slot ${loaded ? "ready" : ""}" data-node-action="upload-product-background-${role}" ${busy ? "disabled" : ""} title="上传或替换${label}">
+        ${loaded ? `<img src="${escapeHtml(imageDisplaySource(source))}" data-asset-url="${escapeHtml(source)}" alt="${label}">` : `<span class="product-background-slot-icon">＋</span>`}
+        <span>${label}${loaded ? " ✓" : " · 上传"}</span>
+      </button>`;
+    };
+    return `
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", node.data.providerId, node.data.model, "image_to_image")}</select></div>
+      <div class="product-background-slots">
+        ${renderSlot(product, "product", "①产品图")}
+        ${renderSlot(background, "background", "②背景图")}
+      </div>
+      <div class="node-row"><span>输出比例</span><select data-field="aspectSource">${optionPairs([["product", "跟随产品图"], ["background", "跟随背景图"]], window.ProductBackground.normalizeAspectSource(node.data.aspectSource))}</select></div>
+      <div class="node-row"><span>补充要求</span><input type="text" data-field="extra" placeholder="可留空。例：产品放在桌面中央" value="${escapeHtml(node.data.extra || "")}"></div>
+      <div class="node-tip">也可连入两张图片：①产品，②背景。一次编辑完成换背景与光影统一，尽量保留外观、文字和材质细节。</div>
+      ${inputError ? `<div class="node-inline-error">${escapeHtml(inputError)}</div>` : ""}
+      <button class="node-button" data-node-action="generate-product-background" ${ready && !busy ? "" : "disabled"}>${busy ? "正在换背景…" : "更换背景"}</button>
+    `;
+  }
+
   if (node.type === "seedreamEdit") {
     const slots = getImageReferenceSlots(node.id);
     const hasBase = Boolean(slots[0]?.node?.data?.url);
@@ -3118,6 +3171,7 @@ function renderNodeBody(node) {
   }
 
   if (node.type === "model3dPreview") {
+    const director = Boolean(node.data.director);
     const hasModel = Boolean(node.data.modelAssetId);
     const hasShot = typeof node.data.url === "string" && node.data.url;
     const modeLabel = { material: "原始材质", clay: "素模", depth: "深度图", normal: "法线图", wireframe: "线框" }[node.data.renderMode] || "素模";
@@ -3126,16 +3180,18 @@ function renderNodeBody(node) {
            <img class="generated-image" src="${escapeHtml(imageDisplaySource(node.data.url) || transparentPixel)}" data-asset-url="${escapeHtml(node.data.url)}" alt="3D 取景" loading="lazy" referrerpolicy="no-referrer">
            <div class="image-load-error"><strong>预览加载失败</strong></div>
          </div>`
-      : `<div class="empty-media model3d-empty" data-node-action="${hasModel ? "model3d-open" : "model3d-upload"}">
+      : `<div class="empty-media model3d-empty" data-node-action="${hasModel || director ? "model3d-open" : "model3d-upload"}">
            <div>
-             <strong>${hasModel ? "点击「调整视角」取景" : "载入 3D 模型"}</strong>
-             <div class="image-drop-hint">glb · gltf · obj · fbx · stl</div>
+             <strong>${director ? "进入 3D 导演台" : hasModel ? "点击「调整视角」取景" : "载入 3D 模型"}</strong>
+             <div class="image-drop-hint">${director ? "布置场景 · 保存机位 · 运镜排练" : "glb · gltf · obj · fbx · stl"}</div>
            </div>
          </div>`;
     const meta = hasModel
       ? `<div class="node-row model3d-meta"><span>${escapeHtml(node.data.modelName || "模型")}</span><b>${escapeHtml(modeLabel)}</b></div>`
       : "";
-    const toolbar = hasModel
+    const toolbar = director
+      ? `<div class="node-row model3d-meta"><span>${node.data.directorData?.shots?.length || 0} 个机位</span><b>3D 导演台</b></div><div class="media-toolbar"><button data-node-action="model3d-open">打开导演台</button></div>`
+      : hasModel
       ? `<div class="media-toolbar">
            <button data-node-action="model3d-open">调整视角</button>
            <button data-node-action="model3d-upload">更换模型</button>
@@ -3262,8 +3318,8 @@ function renderNodeBody(node) {
       ? `<details class="storyboard-section" ${d._optOpen ? "open" : ""}><summary class="storyboard-section-title">更多选项（可选）</summary>${optFields.map((f) => renderTemplateField(f, d, hasRef)).join("")}</details>`
       : "";
     const refHint = hasRef
-      ? `<div class="storyboard-warn">已接参考图 → 以产品实物为准，配色/外观跟随真实产品</div>`
-      : `<span class="indicator">参考图 ○（接「载入图像」可放入真实产品图）</span>`;
+      ? `<div class="storyboard-warn">${escapeHtml(tpl.referenceActiveHint || "已接参考图 → 以产品实物为准，配色/外观跟随真实产品")}</div>`
+      : `<span class="indicator">${escapeHtml(tpl.referenceHint || "参考图 ○（接「载入图像」可放入真实产品图）")}</span>`;
     const model = normalizeModelValue("image", d.model) || getDefaultModel("image");
     return `
       <div class="storyboard-section">
@@ -3944,6 +4000,15 @@ async function createUploadedVideoNode(file, position) {
 // ============ 3D 模型预览节点 ============
 const model3dFormats = ["glb", "gltf", "obj", "fbx", "stl"];
 
+function addDirector3dNode(position) {
+  const id = addNode("model3dPreview", position || getViewportCenter(), {
+    label: "3D 导演台", director: true, renderMode: "material", view: window.Director3D.initialView(), directorData: window.Director3D.normalize(),
+  });
+  nodeMenu.hidden = true;
+  openModel3dEditor(id);
+  return id;
+}
+
 function detectModelFormat(filename) {
   const ext = String(filename || "").split(".").pop().toLowerCase();
   return model3dFormats.includes(ext) ? ext : "";
@@ -3976,9 +4041,10 @@ function triggerModelUpload(nodeId) {
     }
     try {
       const assetId = await persistModelBlob(file, file.name);
+      if (activeModel3dEditor?.nodeId === nodeId) activeModel3dEditor.close();
       commitHistory();
       // 换模型时清掉旧截图与视角，避免对不上。
-      updateNode(nodeId, { modelAssetId: assetId, modelName: file.name, modelFormat: format, url: false, view: null });
+      updateNode(nodeId, { modelAssetId: assetId, modelName: file.name, modelFormat: format, url: false, view: getNode(nodeId)?.data.director ? getNode(nodeId).data.view : null });
       showToast("已载入模型，点击「调整视角」取景");
       openModel3dEditor(nodeId);
     } catch (error) {
@@ -3993,7 +4059,8 @@ let activeModel3dEditor = null;
 async function openModel3dEditor(nodeId) {
   const node = getNode(nodeId);
   if (!node || node.type !== "model3dPreview") return;
-  if (!node.data.modelAssetId) {
+  const isDirector = Boolean(node.data.director);
+  if (!node.data.modelAssetId && !isDirector) {
     triggerModelUpload(nodeId);
     return;
   }
@@ -4024,11 +4091,14 @@ async function openModel3dEditor(nodeId) {
   const initialAoRadius = typeof savedView.aoRadius === "number" ? savedView.aoRadius : 0.5;
 
   const overlay = document.createElement("div");
-  overlay.className = "model3d-overlay";
+  overlay.className = `model3d-overlay${isDirector ? " director3d-overlay" : ""}`;
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-label", isDirector ? "3D 导演台" : "3D 取景");
   overlay.innerHTML = `
     <div class="model3d-dialog">
       <header class="model3d-head">
-        <span class="model3d-title">3D 取景 · ${escapeHtml(node.data.modelName || "模型")}</span>
+        <span class="model3d-title">${isDirector ? "3D 导演台" : "3D 取景"} · ${escapeHtml(node.data.modelName || (isDirector ? "场景排练" : "模型"))}</span>
         <span class="model3d-head-actions">
           <button class="model3d-close" data-m3d="fullscreen" title="全屏 / 还原">⛶</button>
           <button class="model3d-close" data-m3d="cancel" title="关闭">✕</button>
@@ -4037,7 +4107,7 @@ async function openModel3dEditor(nodeId) {
       <div class="model3d-body">
         <div class="model3d-stage" data-m3d="stage">
         <div class="model3d-mask" data-m3d="mask"><div class="model3d-mask-window" data-m3d="maskwin"></div></div>
-        <div class="model3d-loading" data-m3d="loading">加载模型中…</div>
+        <div class="model3d-loading" data-m3d="loading">正在准备场景…</div>
         <div class="model3d-tools" data-m3d="tools">
           <span class="m3d-tools-title">添加</span>
           <button data-m3d="add" data-kind="box" title="立方体">▢</button>
@@ -4100,8 +4170,8 @@ async function openModel3dEditor(nodeId) {
         <button class="node-secondary-button" data-m3d="reset" title="回到标准机位">重置视角</button>
         <span class="model3d-hint" data-m3d="hint">左键旋转 · 右键/方向键平移 · 滚轮缩放</span>
         <div class="model3d-actions">
-          <button class="node-secondary-button" data-m3d="cancel">取消</button>
-          <button class="node-button" data-m3d="capture">截取并应用</button>
+          <button class="node-secondary-button" data-m3d="cancel">保存并关闭</button>
+          <button class="node-button" data-m3d="capture">${isDirector ? "输出当前参考帧" : "截取并应用"}</button>
         </div>
       </footer>
     </div>
@@ -4143,7 +4213,7 @@ async function openModel3dEditor(nodeId) {
   // 对象列表（Outliner）：列出场景对象，点选高亮。
   const objIcon = { model: "◈", primitive: "▢", light: "☀" };
   const lightTypeLabel = { directional: "平行光", point: "点光", spot: "聚光" };
-  const primTypeLabel = { box: "立方体", sphere: "球体", cone: "圆锥", cylinder: "圆柱", plane: "平面", torus: "圆环" };
+  const primTypeLabel = { box: "立方体", sphere: "球体", cone: "圆锥", cylinder: "圆柱", plane: "平面", torus: "圆环", actor: "站姿角色", seatedActor: "坐姿角色" };
   function buildOutliner() {
     if (!controller) { outliner.innerHTML = ""; return; }
     const objs = controller.getObjects();
@@ -4219,10 +4289,64 @@ async function openModel3dEditor(nodeId) {
   function refreshPanel() {
     buildOutliner();
     buildProps(controller ? controller.getSelectionInfo() : null);
+    if (isDirector && controller?.hasSelection()) {
+      const transform = controller.getSelectedTransform();
+      const panel = document.createElement("div");
+      panel.className = "director-transform";
+      panel.innerHTML = `<label>名称 <input aria-label="对象名称" data-transform-name value="${escapeHtml(transform.name || "")}" maxlength="80"></label>${[["position", "位置"], ["rotation", "旋转°"], ["scale", "缩放"]].map(([key, label]) => `<div><span>${label}</span>${transform[key].map((v, i) => `<input aria-label="${label}${["X", "Y", "Z"][i]}" type="number" step="${key === "rotation" ? 5 : 0.1}" value="${Number(v.toFixed(2))}" data-transform="${key}" data-axis="${i}">`).join("")}</div>`).join("")}`;
+      panel.querySelector("[data-transform-name]").addEventListener("input", (event) => {
+        controller.renameSelected(event.target.value, false); buildOutliner(); scheduleSceneSave();
+      });
+      panel.querySelectorAll("[data-transform]").forEach((input) => input.addEventListener("input", () => {
+        if (input.value === "" || !input.validity.valid) return;
+        controller.setSelectedTransform(input.dataset.transform, Number(input.dataset.axis), Number(input.value)); scheduleSceneSave();
+      }));
+      props.prepend(panel);
+    }
   }
 
   let controller = null;
+  let directorUI = null;
   let loaded = false;
+  let closed = false;
+  let captureBusy = false;
+  let sceneSaveTimer = null;
+  const focusBeforeOpen = document.activeElement;
+  const saveScene = (directorData = directorUI?.getData()) => {
+    if (!controller || !loaded || closed) return;
+    const st = controller.getState();
+    Object.assign(st, { aspect: selectedRatio, maskAlpha, showGrid });
+    updateNode(nodeId, { view: st, renderMode: st.renderMode, ...(directorData ? { directorData } : {}) });
+  };
+  const scheduleSceneSave = () => {
+    if (!isDirector || closed) return;
+    clearTimeout(sceneSaveTimer);
+    sceneSaveTimer = setTimeout(() => saveScene(), 250);
+  };
+  const onPageHide = () => saveScene();
+  const syncCamera = () => {
+    fovInput.value = Math.round(controller.getFov()); updateFovLabel(); updateMask();
+    const inShot = controller.getViewMode() === "shot";
+    overlay.querySelector('[data-m3d="viewmode"]').textContent = inShot ? "视角：摄像机" : "视角：自由";
+    overlay.querySelector('[data-m3d="viewmode"]').classList.toggle("free", !inShot);
+  };
+  const exportDirectorFrames = async (frames, motion = null) => {
+    const projectId = projectLibrary.activeProjectId;
+    const sources = await Promise.all(frames.map(async (frame) => persistImageBlob(await (await fetch(frame.url)).blob())));
+    if (projectLibrary.activeProjectId !== projectId || !getNode(nodeId)) throw new Error("项目已切换，请回到原项目重新输出");
+    commitHistory();
+    const source = getNode(nodeId);
+    const startX = source.position.x + 370;
+    const startY = source.position.y + state.nodes.filter((n) => n.data.directorSource === nodeId).length * 45;
+    frames.forEach((frame, index) => {
+      const outputId = addNode("image", { x: startX + index * 335, y: startY }, {
+        label: frame.label, url: sources[index], directorSource: nodeId, directorCamera: frame.camera, directorMotion: motion,
+      });
+      addEdge(nodeId, outputId, "output", { label: frame.label });
+    });
+    updateNode(nodeId, { url: sources[0] });
+    saveScene();
+  };
   const onResize = () => { if (controller) controller.resize(); updateMask(); };
   const syncGizmoButtons = () => {
     const m = controller?.getGizmoMode?.() || "translate";
@@ -4230,24 +4354,31 @@ async function openModel3dEditor(nodeId) {
   };
 
   const cleanup = () => {
+    if (closed) return;
+    clearTimeout(sceneSaveTimer);
+    directorUI?.stop();
+    saveScene();
+    closed = true;
     window.removeEventListener("resize", onResize);
     document.removeEventListener("keydown", onKey);
+    window.removeEventListener("pagehide", onPageHide);
     // 关闭即保存场景（零件 + 视角），无论取消还是截取——摆场景和出图是两件事。
-    if (controller && loaded) {
-      try {
-        const st = controller.getState();
-        st.aspect = selectedRatio;
-        st.maskAlpha = maskAlpha;
-        st.showGrid = showGrid;
-        updateNode(nodeId, { view: st, renderMode: st.renderMode });
-      } catch (_) {}
+    directorUI?.dispose();
+    if (controller) {
       try { controller.dispose(); } catch (_) {}
     }
     controller = null;
     overlay.remove();
     activeModel3dEditor = null;
+    if (focusBeforeOpen?.isConnected) focusBeforeOpen.focus();
   };
   const onKey = (e) => {
+    if (e.key === "Tab") {
+      const items = [...overlay.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), canvas')].filter((el) => el.getClientRects().length);
+      const first = items[0]; const last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+    }
     const tag = e.target.tagName;
     if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") {
       if (e.key === "Escape") cleanup();
@@ -4366,9 +4497,16 @@ async function openModel3dEditor(nodeId) {
       return;
     }
     if (act === "capture") {
-      if (!controller) return;
+      if (!controller || !loaded || captureBusy) return;
+      captureBusy = true;
+      directorUI?.stop();
       try {
         const dataUrl = controller.capture("image/png", ratioNumOf(selectedRatio));
+        if (isDirector) {
+          await exportDirectorFrames([{ label: "导演台参考帧", url: dataUrl, camera: controller.getShot() }]);
+          showToast("参考帧已输出到画布");
+          return;
+        }
         // 始终写 IndexedDB（不走 persistImageSource 的 120KB 阈值），避免 base64 进 localStorage 撑爆配额。
         const blob = await (await fetch(dataUrl)).blob();
         const sentinel = await persistImageBlob(blob);
@@ -4382,14 +4520,21 @@ async function openModel3dEditor(nodeId) {
         cleanup();
       } catch (error) {
         showToast(`截取失败：${error.message}`);
+      } finally {
+        captureBusy = false;
       }
     }
   });
   // 浮层背景点击关闭
-  overlay.addEventListener("pointerdown", (e) => { if (e.target === overlay) cleanup(); });
+  overlay.addEventListener("pointerdown", (e) => {
+    if (e.target === overlay) cleanup();
+    else if (!e.target.closest(".director-timeline")) directorUI?.stop();
+  });
+  overlay.addEventListener("change", scheduleSceneSave);
+  overlay.addEventListener("click", scheduleSceneSave);
 
   try {
-    controller = window.Model3D.mount(stage, { renderMode: initialMode, onSelectionChange: refreshPanel });
+    controller = window.Model3D.mount(stage, { renderMode: initialMode, director: isDirector, onSelectionChange: refreshPanel, onChange: scheduleSceneSave });
     fovInput.addEventListener("input", () => { controller.setFov(fovInput.value); updateFovLabel(); });
     modeSelect.addEventListener("change", () => controller.setRenderMode(modeSelect.value));
     ratioSelect.addEventListener("change", () => {
@@ -4408,10 +4553,15 @@ async function openModel3dEditor(nodeId) {
     aoRadInput.addEventListener("input", () => controller.setAORadius(Number(aoRadInput.value) / 100));
     window.addEventListener("resize", onResize);
     document.addEventListener("keydown", onKey);
+    window.addEventListener("pagehide", onPageHide);
 
-    const blob = await getModelBlob(node.data.modelAssetId);
-    if (!blob) throw new Error("模型文件丢失，请重新载入");
-    await controller.loadModel(blob, node.data.modelFormat);
+    if (node.data.modelAssetId) {
+      const blob = await getModelBlob(node.data.modelAssetId);
+      if (closed) return;
+      if (!blob) throw new Error("模型文件丢失，请重新载入");
+      await controller.loadModel(blob, node.data.modelFormat);
+      if (closed) return;
+    }
     // 还原上次视角与场景零件（若有），否则用 loadModel 的自动取景。
     if (node.data.view) controller.setState(node.data.view);
     controller.setFov(fovInput.value);
@@ -4428,7 +4578,19 @@ async function openModel3dEditor(nodeId) {
     refreshPanel();
     loaded = true;
     loadingEl.remove();
+    if (isDirector) {
+      directorUI = window.Director3D.mountUI({
+        overlay, controller, data: node.data.directorData,
+        getAspect: () => selectedRatio,
+        applyAspect: (value) => { selectedRatio = value; ratioSelect.value = value; updateMask(); },
+        syncCamera, save: saveScene, exportFrames: exportDirectorFrames, notice: showToast,
+        importModel: () => triggerModelUpload(nodeId), escapeHtml,
+      });
+      controller.resize(); updateMask();
+    }
+    overlay.querySelector('[data-m3d="fullscreen"]').focus();
   } catch (error) {
+    if (closed) return;
     if (loadingEl) loadingEl.textContent = `加载失败：${error.message}`;
     showToast(`3D 加载失败：${error.message}`);
   }
@@ -4470,7 +4632,7 @@ function blobToDataUrl(blob) {
 }
 
 function hydrateAssetImages() {
-  document.querySelectorAll(".generated-image[data-asset-url], video.result-video[data-asset-url]").forEach((el) => {
+  document.querySelectorAll(".generated-image[data-asset-url], .product-background-slot img[data-asset-url], video.result-video[data-asset-url]").forEach((el) => {
     const assetId = getIndexedImageId(el.dataset.assetUrl);
     if (!assetId || el.dataset.assetLoading === "1") return;
     if (imageAssetObjectUrls.has(assetId)) {
@@ -4691,6 +4853,27 @@ function addNode(type, position = getViewportCenter(), data = {}) {
       strength: "balanced",
       extra: "",
     },
+    materialTransferConfig: {
+      label: "材质迁移",
+      model: getDefaultModel("image"),
+      size: getImageSizeValue(getDefaultModel("image"), "2048x2048"),
+      quality: "高清画质",
+      outputFormat: "png",
+      promptOptimization: "standard",
+      strength: "balanced",
+      materialHint: "",
+      extra: "",
+    },
+    productBackgroundConfig: {
+      label: "产品换背景",
+      model: getDefaultModel("image"),
+      size: getImageSizeValue(getDefaultModel("image"), "2048x2048"),
+      quality: "高清画质",
+      outputFormat: "png",
+      promptOptimization: "standard",
+      aspectSource: "product",
+      extra: "",
+    },
     faceSwapConfig: { label: "换脸", model: getDefaultModel("image"), size: getImageSizeValue(getDefaultModel("image"), "2048x2048"), quality: "高清画质", extra: "" },
     seedreamEdit: {
       label: "精确图片编辑",
@@ -4776,6 +4959,21 @@ function addNode(type, position = getViewportCenter(), data = {}) {
   saveState();
   render();
   return node.id;
+}
+
+function addImageTemplateNode(templateKey, position = getViewportCenter()) {
+  const templates = (typeof window !== "undefined" && window.IMAGE_TEMPLATES) || {};
+  const tpl = templates[templateKey];
+  if (!tpl) {
+    showToast("找不到指定的营销物料模板");
+    return null;
+  }
+  return addNode("templateImageConfig", position, {
+    label: tpl.label || "营销物料",
+    template: templateKey,
+    ...(tpl.defaults || {}),
+    size: getImageSizeValue(getDefaultModel("image"), tpl.size || "1024x1536"),
+  });
 }
 
 function addEdge(source, target, type = "default", data = {}) {
@@ -5718,6 +5916,160 @@ async function generateStyleTransfer(configId) {
   }
 }
 
+async function generateMaterialTransfer(configId) {
+  const config = getNode(configId);
+  if (!config || config.type !== "materialTransferConfig") return;
+  const slots = getImageReferenceSlots(configId);
+  try {
+    window.MaterialTransfer.validateInputCount(slots.length);
+  } catch (error) {
+    showToast(error.message);
+    return;
+  }
+  const structureNode = slots[0].node;
+  const materialNode = slots[1].node;
+  if (!structureNode?.data?.url || !materialNode?.data?.url) {
+    showToast("主体 / 结构图和材质参考图都需要先载入完成");
+    return;
+  }
+
+  const model = normalizeModelValue("image", config.data.model) || getDefaultModel("image");
+  if (isFluxImageModel(model)) {
+    showToast("材质迁移需要支持两张参考图的模型，请选择 GPT Image、Gemini、Seedream 或 Midjourney");
+    return;
+  }
+  const strength = window.MaterialTransfer.normalizeStrength(config.data.strength);
+  const prompt = window.MaterialTransfer.buildPrompt({
+    strength,
+    materialHint: config.data.materialHint,
+    extra: config.data.extra,
+  });
+  const existing = findOutputImageNode(configId);
+  let imageId = existing?.id || null;
+  if (!imageId) {
+    imageId = addNode("image", { x: config.position.x + 420, y: config.position.y }, { label: "材质迁移结果", loading: true, model });
+    addEdge(configId, imageId, "output", { label: "输出" });
+  } else {
+    updateNode(imageId, { label: "材质迁移结果", loading: true, url: false, error: "" });
+  }
+
+  const imgConfigured = hasApiKey("image", config.data.providerId);
+  showProcessing(imgConfigured ? "正在迁移主体材质..." : "未配置图像 API Key，使用本地模拟生成...");
+  if (!imgConfigured) {
+    setTimeout(() => {
+      updateNode(imageId, { loading: false, url: true, model, gradient: generateGradient(`material-transfer-${strength}`), error: "" });
+      updateNode(configId, { executed: true });
+      hideProcessing("材质迁移完成（模拟）");
+    }, 850);
+    return;
+  }
+
+  try {
+    // 第1张始终是结构母版，第2张始终是材质样本，顺序与提示词合同一致。
+    const refImages = await Promise.all([structureNode, materialNode].map((node) => resolveImageForApi(node.data.url)));
+    if (refImages.some((source) => !source)) throw new Error("参考图读取失败，请确认两张图片都已就绪");
+    const aspect = await probeImageAspect(structureNode.data.url);
+    const nextData = { ...config.data, model };
+    if (isMjImageModel(model)) {
+      if (aspect) nextData.mjAr = nearestByAspect(mjAspectOptions, aspect);
+    } else if (aspect) {
+      nextData.size = imageSizeForAspect(model, aspect, config.data.size);
+    }
+    const requestConfig = { ...config, data: nextData };
+    const url = isMjImageModel(model)
+      ? await requestMjImageGeneration(requestConfig, prompt, refImages)
+      : await requestImageGeneration(requestConfig, prompt, refImages);
+    updateNode(imageId, { loading: false, url, model, gradient: generateGradient(`material-transfer-${strength}`), error: "" });
+    updateNode(configId, { executed: true });
+    hideProcessing("材质迁移完成");
+    void recordProjectHistory({ type: "image", url, prompt: `[材质迁移:${strength}] ${String(config.data.materialHint || "").trim()}`.trim(), model });
+  } catch (error) {
+    const friendly = friendlyImageError(error.message);
+    updateNode(imageId, { loading: false, url: false, error: friendly });
+    processing.hidden = true;
+    showToast(`材质迁移失败：${error.message}`);
+  }
+}
+
+const activeProductBackgroundRuns = new Set();
+
+async function generateProductBackground(configId) {
+  const config = getNode(configId);
+  if (!config || config.type !== "productBackgroundConfig" || activeProductBackgroundRuns.has(configId)) return;
+  let inputs;
+  try { inputs = window.ProductBackground.validateInputs(getImageReferenceSlots(configId)); }
+  catch (error) { showToast(error.message); return; }
+  const model = normalizeModelValue("image", config.data.model) || getDefaultModel("image");
+  if (isFluxImageModel(model) || isMjImageModel(model)) {
+    showToast("产品换背景需要双图编辑模型，请选择 GPT Image、Gemini 或 Seedream");
+    return;
+  }
+  if (!hasApiKey("image", config.data.providerId)) {
+    showToast("请先配置所选图片模型的 API，再进行产品换背景");
+    return;
+  }
+
+  // 固定输入顺序和本次参数，后续上传或调整控件不会改变正在运行的任务。
+  const sources = [inputs.product.node.data.url, inputs.background.node.data.url];
+  const settings = { ...config.data, model };
+  const prompt = window.ProductBackground.buildPrompt(settings);
+  activeProductBackgroundRuns.add(configId);
+  const existing = findOutputImageNode(configId);
+  let imageId = existing?.id || null;
+  try {
+    if (!imageId) {
+      imageId = addNode("image", { x: config.position.x + 430, y: config.position.y }, { label: "产品换背景结果", loading: true, model });
+      addEdge(configId, imageId, "output", { label: "输出" });
+    } else {
+      updateNode(imageId, { label: "产品换背景结果", loading: true, url: false, error: "" });
+    }
+    showProcessing("正在更换产品背景并统一光影...");
+    const refImages = await Promise.all(sources.map((source) => resolveImageForApi(source)));
+    if (refImages.some((source) => !source)) throw new Error("输入图片读取失败，请重新载入产品图和背景图");
+    const aspectIndex = window.ProductBackground.normalizeAspectSource(settings.aspectSource) === "background" ? 1 : 0;
+    const aspect = await probeImageAspect(sources[aspectIndex]);
+    if (aspect) settings.size = imageSizeForAspect(model, aspect, settings.size);
+    const url = await requestImageGeneration({ ...config, data: settings }, prompt, refImages);
+    updateNode(imageId, { loading: false, url, model, error: "" });
+    updateNode(configId, { executed: true });
+    hideProcessing("产品换背景完成");
+    void recordProjectHistory({ type: "image", url, prompt, model });
+  } catch (error) {
+    if (imageId) updateNode(imageId, { loading: false, url: false, error: friendlyImageError(error.message) });
+    processing.hidden = true;
+    showToast(`产品换背景失败：${error.message}`);
+  } finally {
+    activeProductBackgroundRuns.delete(configId);
+    render();
+  }
+}
+
+function triggerProductBackgroundUpload(configId, role) {
+  if (activeProductBackgroundRuns.has(configId)) return;
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/png,image/jpeg,image/webp";
+  input.addEventListener("change", async () => {
+    const file = input.files?.[0];
+    const config = getNode(configId);
+    if (!file || !config || activeProductBackgroundRuns.has(configId)) return;
+    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) { showToast("请上传 PNG、JPEG 或 WebP 图片"); return; }
+    try {
+      const url = await persistImageBlob(file);
+      if (!getNode(configId) || activeProductBackgroundRuns.has(configId)) return;
+      const assigned = window.ProductBackground.assignInputs(getImageReferenceSlots(configId));
+      const previous = assigned[role];
+      const label = role === "background" ? "背景图" : "产品图";
+      // 上传替换只换此节点的输入连线，保留原素材供其他工作流继续使用。
+      if (previous) removeEdge(previous.edge.id);
+      const id = addNode("image", { x: config.position.x - 350, y: config.position.y + (role === "background" ? nodeSizes.image.height + 40 : 0) }, { label, url });
+      addEdge(id, configId, "imageOrder", { label });
+      showToast(`已载入${label}`);
+    } catch (error) { showToast(`载入失败：${error.message}`); }
+  });
+  input.click();
+}
+
 async function generateSeedreamEdit(configId) {
   const config = getNode(configId);
   if (!config || config.type !== "seedreamEdit") return;
@@ -6546,6 +6898,15 @@ function inferConnection(sourceId, targetId) {
     const existing = getImageReferenceSlots(targetId).length;
     return { type: "imageOrder", label: window.StyleTransfer.connectionLabel(existing) };
   }
+  if (source?.type === "materialTransferConfig" && target?.type === "image") return { type: "output", label: "输出" };
+  if (target?.type === "materialTransferConfig" && ["image", "layerGroup", "model3dPreview"].includes(source?.type)) {
+    const existing = getImageReferenceSlots(targetId).length;
+    return { type: "imageOrder", label: window.MaterialTransfer.connectionLabel(existing) };
+  }
+  if (source?.type === "productBackgroundConfig" && target?.type === "image") return { type: "output", label: "输出" };
+  if (target?.type === "productBackgroundConfig" && ["image", "layerGroup", "model3dPreview"].includes(source?.type)) {
+    return { type: "imageOrder", label: window.ProductBackground.nextConnectionLabel(getImageReferenceSlots(targetId)) };
+  }
   if (target?.type === "promptOptimizer" && source?.type === "text") return { type: "promptOrder", label: "原始创意" };
   if (target?.type === "storyboardAssistant" && ["text", "llmConfig", "promptOptimizer"].includes(source?.type)) return { type: "promptOrder", label: "故事/概念" };
   if (target?.type === "imageConfig" && ["text", "llmConfig", "storyboardAssistant", "promptOptimizer"].includes(source?.type)) return { type: "promptOrder", label: "提示词" };
@@ -6600,6 +6961,8 @@ const connectionDropTargets = {
   image: [
     { type: "imageConfig", label: "+ 图片生成(用作参考图)" },
     { type: "styleTransferConfig", label: "+ 风格迁移(用作内容图)" },
+    { type: "productBackgroundConfig", label: "+ 产品换背景(用作产品图)" },
+    { type: "materialTransferConfig", label: "+ 材质迁移(用作主体/结构)" },
     { type: "seedreamEdit", label: "+ Seedream 精确编辑" },
     { type: "layerSeparation", label: "+ Seedream 智能图层分离" },
     { type: "templateImageConfig", label: "+ 营销物料(用作产品图)" },
@@ -6620,6 +6983,12 @@ const connectionDropTargets = {
   styleTransferConfig: [
     { type: "image", label: "+ 风格迁移结果" },
   ],
+  materialTransferConfig: [
+    { type: "image", label: "+ 材质迁移结果" },
+  ],
+  productBackgroundConfig: [
+    { type: "image", label: "+ 产品换背景结果" },
+  ],
   seedreamEdit: [
     { type: "image", label: "+ 精确编辑结果" },
   ],
@@ -6628,7 +6997,9 @@ const connectionDropTargets = {
   ],
   layerGroup: [
     { type: "image", label: "+ 合成图片" },
+    { type: "productBackgroundConfig", label: "+ 产品换背景(用作产品图)" },
     { type: "imageConfig", label: "+ 图片生成(用作参考图)" },
+    { type: "materialTransferConfig", label: "+ 材质迁移(用作主体/结构)" },
     { type: "seedreamEdit", label: "+ Seedream 精确编辑" },
     { type: "videoConfig", label: "+ 视频生成(用作首帧)" },
   ],
@@ -6637,6 +7008,11 @@ const connectionDropTargets = {
   ],
   storyboardConfig: [
     { type: "image", label: "+ 故事板图像" },
+  ],
+  model3dPreview: [
+    { type: "productBackgroundConfig", label: "+ 产品换背景(用作产品图)" },
+    { type: "materialTransferConfig", label: "+ 材质迁移(用作主体/结构)" },
+    { type: "imageConfig", label: "+ 图片生成(用作参考图)" },
   ],
 };
 
@@ -6722,6 +7098,14 @@ async function refreshNode(id) {
     generateStyleTransfer(id);
     return;
   }
+  if (node.type === "materialTransferConfig") {
+    generateMaterialTransfer(id);
+    return;
+  }
+  if (node.type === "productBackgroundConfig") {
+    generateProductBackground(id);
+    return;
+  }
   if (node.type === "templateImageConfig") {
     generateTemplateImage(id);
     return;
@@ -6756,6 +7140,21 @@ async function refreshNode(id) {
     return;
   }
   if (node.type === "image") {
+    const materialConfig = incomingNodes(id, ["materialTransferConfig"])[0];
+    const productBackgroundConfig = incomingNodes(id, ["productBackgroundConfig"])[0];
+    if (productBackgroundConfig) {
+      generateProductBackground(productBackgroundConfig.id);
+      return;
+    }
+    if (materialConfig) {
+      generateMaterialTransfer(materialConfig.id);
+      return;
+    }
+    const styleConfig = incomingNodes(id, ["styleTransferConfig"])[0];
+    if (styleConfig) {
+      generateStyleTransfer(styleConfig.id);
+      return;
+    }
     const tplConfig = incomingNodes(id, ["templateImageConfig"])[0];
     if (tplConfig) {
       generateTemplateImage(tplConfig.id);
@@ -7062,6 +7461,26 @@ function createStyleTransferFromImage(imageId) {
   showToast("已连接为内容图，再把风格参考图连进来即可");
 }
 
+function createMaterialTransferFromSource(sourceId) {
+  const source = getNode(sourceId);
+  if (!source || !["image", "layerGroup", "model3dPreview"].includes(source.type)) return;
+  if (!source.data?.url) {
+    showToast(source.type === "model3dPreview" ? "先在 3D 模型预览里截取当前视角" : "先准备好主体 / 结构图");
+    return;
+  }
+  const configId = addNode("materialTransferConfig", { x: source.position.x + 350, y: source.position.y }, { label: "材质迁移" });
+  addEdge(sourceId, configId, "imageOrder", { label: "主体 / 结构" });
+  showToast("已连接为主体 / 结构，再把材质参考图连进来即可");
+}
+
+function createProductBackgroundFromSource(sourceId) {
+  const source = getNode(sourceId);
+  if (!source || !["image", "layerGroup", "model3dPreview"].includes(source.type)) return;
+  const configId = addNode("productBackgroundConfig", { x: source.position.x + 350, y: source.position.y });
+  addEdge(sourceId, configId, "imageOrder", { label: "产品图" });
+  showToast("已连接产品图，上传或连接背景图即可");
+}
+
 function createSeedreamPreciseEdit(imageId) {
   const image = getNode(imageId);
   if (!image) return;
@@ -7280,6 +7699,8 @@ function renderContextMenu() {
     items.push({ kind: "separator" });
     items.push({ action: "image-to-image", label: "创建图生图" });
     items.push({ action: "style-transfer", label: "创建风格迁移" });
+    items.push({ action: "product-background", label: "创建产品换背景" });
+    items.push({ action: "material-transfer", label: "创建材质迁移" });
     items.push({ action: "seedream-precise-edit", label: "Seedream 精确编辑" });
     items.push({ action: "seedream-layer-separation", label: "Seedream 智能图层分离" });
     items.push({ action: "image-to-video", label: "创建生视频" });
@@ -7319,6 +7740,8 @@ function renderContextMenu() {
     if (node.type === "image") {
       items.push({ action: "image-to-image", label: "创建图生图" });
       items.push({ action: "style-transfer", label: "创建风格迁移" });
+      items.push({ action: "product-background", label: "创建产品换背景" });
+      items.push({ action: "material-transfer", label: "创建材质迁移" });
       items.push({ action: "seedream-precise-edit", label: "Seedream 精确编辑" });
       items.push({ action: "seedream-layer-separation", label: "Seedream 智能图层分离" });
       items.push({ action: "image-to-video", label: "创建生视频" });
@@ -7326,7 +7749,11 @@ function renderContextMenu() {
     if (node.type === "layerGroup") {
       items.push({ action: "open-layer-editor", label: "编辑图层" });
       items.push({ action: "layer-group-to-image", label: "合成为图片" });
+      items.push({ action: "product-background", label: "创建产品换背景" });
+      items.push({ action: "material-transfer", label: "创建材质迁移" });
     }
+    if (node.type === "model3dPreview") items.push({ action: "material-transfer", label: "创建材质迁移" });
+    if (node.type === "model3dPreview") items.push({ action: "product-background", label: "创建产品换背景" });
     if (nodeGroupId) items.push({ action: "remove-node-from-group", label: "移除群组" });
     items.push({ kind: "separator" });
     items.push({ action: "delete-node", label: "删除节点", danger: true });
@@ -7396,6 +7823,8 @@ function handleContextAction(action) {
   if (action === "delete-node" && nodeId) removeNode(nodeId);
   if (action === "image-to-image" && nodeId) createImageToImage(nodeId);
   if (action === "style-transfer" && nodeId) createStyleTransferFromImage(nodeId);
+  if (action === "material-transfer" && nodeId) createMaterialTransferFromSource(nodeId);
+  if (action === "product-background" && nodeId) createProductBackgroundFromSource(nodeId);
   if (action === "seedream-precise-edit" && nodeId) createSeedreamPreciseEdit(nodeId);
   if (action === "seedream-layer-separation" && nodeId) createSeedreamLayerSeparation(nodeId);
   if (action === "open-layer-editor" && nodeId) openLayerGroupEditor(nodeId);
@@ -7425,6 +7854,8 @@ function handleContextAction(action) {
     "add-storyboard-config": "storyboardConfig",
     "add-template-image-config": "templateImageConfig",
     "add-style-transfer-config": "styleTransferConfig",
+    "add-material-transfer-config": "materialTransferConfig",
+    "add-product-background-config": "productBackgroundConfig",
     "add-face-swap-config": "faceSwapConfig",
     "add-seedream-edit": "seedreamEdit",
     "add-layer-separation": "layerSeparation",
@@ -7435,6 +7866,8 @@ function handleContextAction(action) {
     "add-model3d": "model3dPreview",
   };
   if (typeByAction[action]) addNode(typeByAction[action], worldPoint);
+  if (action === "add-director3d") addDirector3dNode(worldPoint);
+  if (action === "add-forced-perspective-poster") addImageTemplateNode("forced-perspective-poster", worldPoint);
   if (action === "add-uploaded-image") {
     const size = nodeSizes.image;
     createUploadedImageNode(null, worldPoint ? { x: worldPoint.x - size.width / 2, y: worldPoint.y - size.height / 2 } : undefined);
@@ -8465,6 +8898,10 @@ document.addEventListener("click", async (event) => {
     if (nodeAction === "generate-expand") generateImageExpand(id);
     if (nodeAction === "generate-faceswap") generateFaceSwap(id);
     if (nodeAction === "generate-style-transfer") generateStyleTransfer(id);
+    if (nodeAction === "generate-material-transfer") generateMaterialTransfer(id);
+    if (nodeAction === "generate-product-background") generateProductBackground(id);
+    if (nodeAction === "upload-product-background-product") triggerProductBackgroundUpload(id, "product");
+    if (nodeAction === "upload-product-background-background") triggerProductBackgroundUpload(id, "background");
     if (nodeAction === "open-seedream-editor") openSeedreamAnnotationEditor(id);
     if (nodeAction === "generate-seedream-edit") generateSeedreamEdit(id);
     if (nodeAction === "generate-layer-separation") generateLayerSeparation(id);
@@ -8559,14 +8996,18 @@ document.addEventListener("click", async (event) => {
   if (action === "add-image-config") addNode("imageConfig");
   if (action === "add-video-config") addNode("videoConfig");
   if (action === "add-storyboard-config") addNode("storyboardConfig");
+  if (action === "add-forced-perspective-poster") addImageTemplateNode("forced-perspective-poster");
   if (action === "add-template-image-config") addNode("templateImageConfig");
   if (action === "add-style-transfer-config") addNode("styleTransferConfig");
+  if (action === "add-material-transfer-config") addNode("materialTransferConfig");
+  if (action === "add-product-background-config") addNode("productBackgroundConfig");
   if (action === "add-face-swap-config") addNode("faceSwapConfig");
   if (action === "add-seedream-edit") addNode("seedreamEdit");
   if (action === "add-layer-separation") addNode("layerSeparation");
   if (action === "add-image-compare") addNode("imageCompare");
   if (action === "add-image-expand") addNode("imageExpand");
   if (action === "add-model3d") addNode("model3dPreview");
+  if (action === "add-director3d") addDirector3dNode();
   if (action === "zoom-in") setView({ ...state.view, zoom: state.view.zoom * 1.18 });
   if (action === "zoom-out") setView({ ...state.view, zoom: state.view.zoom / 1.18 });
   if (action === "fit-view") fitView();
@@ -8653,7 +9094,7 @@ function syncNodeFieldControl(control) {
       node.data.size = getImageSizeValue(node.data.model, node.data.size);
     }
   }
-  if (field === "model" && node.type === "styleTransferConfig") {
+  if (field === "model" && ["styleTransferConfig", "materialTransferConfig", "productBackgroundConfig"].includes(node.type)) {
     if (isMjImageModel(node.data.model)) {
       node.data.mjAr = node.data.mjAr || "1:1";
       node.data.mjVersion = getMjVersion(node.data.model, node.data.mjVersion);
@@ -8726,6 +9167,8 @@ function normalizeNodeModelValue(nodeType, value) {
   if (nodeType === "promptOptimizer") return normalizeModelValue("chat", value);
   if (nodeType === "imageConfig") return normalizeModelValue("image", value);
   if (nodeType === "styleTransferConfig") return normalizeModelValue("image", value);
+  if (nodeType === "materialTransferConfig") return normalizeModelValue("image", value);
+  if (nodeType === "productBackgroundConfig") return normalizeModelValue("image", value);
   if (nodeType === "templateImageConfig") return normalizeModelValue("image", value);
   if (nodeType === "seedreamEdit") return normalizeModelValue("image", value);
   if (nodeType === "layerSeparation") return normalizeModelValue("image", value);
@@ -8794,6 +9237,7 @@ projectImportInput.addEventListener("change", async () => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (activeModel3dEditor) return;
   if (event.key === "Escape" && !connectionDropMenu.hidden) {
     event.preventDefault();
     hideConnectionDropMenu();

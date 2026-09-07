@@ -20,6 +20,7 @@
       items: [
         { action: "add-image-config", label: "图片生成" },
         { action: "add-storyboard-config", label: "故事板生成" },
+        { action: "add-forced-perspective-poster", label: "强迫透视海报" },
         { action: "add-template-image-config", label: "营销物料" },
       ],
     },
@@ -28,6 +29,8 @@
       label: "图片编辑",
       items: [
         { action: "add-style-transfer-config", label: "风格迁移" },
+        { action: "add-material-transfer-config", label: "材质迁移" },
+        { action: "add-product-background-config", label: "产品换背景" },
         { action: "add-face-swap-config", label: "换脸" },
         { action: "add-seedream-edit", label: "精确图片编辑" },
         { action: "add-layer-separation", label: "智能图层分离" },
@@ -39,6 +42,7 @@
       id: "video",
       label: "视频创作",
       items: [
+        { action: "add-director3d", label: "3D 导演台" },
         { action: "add-video-config", label: "视频生成配置" },
       ],
     },

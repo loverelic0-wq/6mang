@@ -21,15 +21,15 @@ test("node creation actions are grouped without omissions or duplicates", () => 
     },
     {
       label: "图片生成",
-      actions: ["add-image-config", "add-storyboard-config", "add-template-image-config"],
+      actions: ["add-image-config", "add-storyboard-config", "add-forced-perspective-poster", "add-template-image-config"],
     },
     {
       label: "图片编辑",
-      actions: ["add-style-transfer-config", "add-face-swap-config", "add-seedream-edit", "add-layer-separation", "add-image-compare", "add-image-expand"],
+      actions: ["add-style-transfer-config", "add-material-transfer-config", "add-product-background-config", "add-face-swap-config", "add-seedream-edit", "add-layer-separation", "add-image-compare", "add-image-expand"],
     },
     {
       label: "视频创作",
-      actions: ["add-video-config"],
+      actions: ["add-director3d", "add-video-config"],
     },
     {
       label: "素材与预览",

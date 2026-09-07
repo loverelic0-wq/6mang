@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>6mang</title>
     <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./director3d.css" />
   </head>
   <body>
     <section class="project-home" id="projectHome" aria-label="项目管理">
@@ -38,6 +39,7 @@
             <span id="projectName">AI Canvas Demo</span>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5" /></svg>
           </button>
+          <button class="ghost-button director-launch" data-action="add-director3d" title="布置场景、保存机位、预览运镜">3D 导演台</button>
         </div>
         <div class="header-center">
           <span class="status-dot"></span>
@@ -102,11 +104,15 @@
           <button data-action="add-text"><span class="node-menu-icon blue"></span>文本节点</button>
           <button data-action="add-llm"><span class="node-menu-icon violet"></span>LLM 文本生成</button>
           <button data-action="add-storyboard-assistant"><span class="node-menu-icon violet"></span>分镜助手</button>
+          <button data-action="add-director3d"><span class="node-menu-icon violet"></span>3D 导演台</button>
           <button data-action="add-prompt-optimizer"><span class="node-menu-icon violet"></span>提示词优化</button>
           <button data-action="add-image-config"><span class="node-menu-icon green"></span>图片生成</button>
           <button data-action="add-storyboard-config"><span class="node-menu-icon violet"></span>故事板生成</button>
+          <button data-action="add-forced-perspective-poster"><span class="node-menu-icon green"></span>强迫透视海报</button>
           <button data-action="add-template-image-config"><span class="node-menu-icon green"></span>营销物料</button>
           <button data-action="add-style-transfer-config"><span class="node-menu-icon purple"></span>风格迁移</button>
+          <button data-action="add-material-transfer-config"><span class="node-menu-icon purple"></span>材质迁移</button>
+          <button data-action="add-product-background-config"><span class="node-menu-icon purple"></span>产品换背景</button>
           <button data-action="add-face-swap-config"><span class="node-menu-icon green"></span>换脸</button>
           <button data-action="add-seedream-edit"><span class="node-menu-icon purple"></span>精确图片编辑</button>
           <button data-action="add-layer-separation"><span class="node-menu-icon purple"></span>智能图层分离</button>
@@ -152,6 +158,9 @@
     <script src="./gpt-image-2-sizes.js"></script>
     <script src="./seedream-tools.js"></script>
     <script src="./style-transfer.js"></script>
+    <script src="./material-transfer.js"></script>
+    <script src="./product-background.js"></script>
+    <script src="./director3d.js"></script>
     <script src="./context-menu-model.js"></script>
     <script src="./theme-styles.js"></script>
     <script src="./video-polling.js"></script>
