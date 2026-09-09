@@ -9,8 +9,8 @@
 ## 启动
 
 - `npm run dev` / `npm start` —— 两条都是 `node server/server.js`，没有构建步骤；`npm test` 运行 `node --test server/*.test.js`。
-- `quick-start.cmd` —— Windows 一键启动：缺 `.env` 时从 `.env.example` 生成，启动后浏览器自动打开 `http://${HOST}:${PORT}`（默认 `127.0.0.1:8787`）。
-- **Node 22+ 必需**：`server/db.js` 使用 `require("node:sqlite")`（Node 22 起内置）。之前 README 说的 "Node 18+" 已经不准确。
+- 快速启动入口：Windows `quick-start.cmd`、macOS `quick-start.command`、Linux `quick-start.sh`，共用 `scripts/quick-start.js`。仅在缺 `.env` 时从 `.env.example` 生成，实际监听成功后才打开浏览器，保留已有 HOST/PORT（默认 `127.0.0.1:8787`）。跨系统桌面快捷方式、更新与备份见 `docs/CODEX-DEPLOY.md`。
+- **推荐 Node 24 LTS，或兼容的 22.13+**：`server/db.js` 使用 `require("node:sqlite")`；22.13 起无需实验开关。启动器实际创建内存 SQLite 数据库检查可用性，不能只看版本号。
 - **`node_modules` 不存在也是对的**：项目零 npm 依赖，所有功能用 Node 内置模块（`http` / `node:sqlite` / `crypto` / 全局 `fetch`）。不要加 Express、dotenv、bcrypt、better-sqlite3 等。
 - **首次启动会自动创建 admin 账户**：用户名 `admin`，密码取 `process.env.ADMIN_PASSWORD || "admin1234"`，初始余额 100000。控制台会打印一行 `[bootstrap] created default admin`。该账户写入 `data/app.db`，仅在表为空时创建一次。
 

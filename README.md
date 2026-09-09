@@ -1,56 +1,56 @@
 # 6mang
 
-前端 + 后端结构的 AI Canvas 原型。
+把文本、图片、视频和 3D 参考画面连成工作流的本地 AI 画布。
+
+**新用户先看：[给 Codex 的完整部署说明](docs/CODEX-DEPLOY.md)**，包含可直接复制的安装任务、Windows / macOS / Linux 桌面快速启动、安全更新和数据备份。
+
+**以后更新统一在这篇 [社群固定更新帖](https://6mangaigc.com/content/02a77714-0d4d-4911-98d3-b0cf24378c71) 查看。**
 
 ## 下载最新版本
 
 **`master` 是唯一维护的分支，仓库首页展示的就是最新版本。** 所有功能更新统一合入这里。
 
 - 不熟悉 Git：点击 **[下载最新版 ZIP](https://github.com/loverelic0-wq/6mang/archive/refs/heads/master.zip)**，解压后按下面步骤启动。
-- 使用 Git：运行 `git clone https://github.com/loverelic0-wq/6mang.git`，进入 `6mang` 目录即可。
+- 使用 Git：运行 `git clone --branch master --single-branch https://github.com/loverelic0-wq/6mang.git`，进入 `6mang` 目录即可。
 
 当前版本包含 GPT Image 2.5 Flare / Sunburst、可灵 CLI、Seedream 专业图片编辑、CPRT 视频、产品换背景和 3D 导演台。
 
 ## 快速启动
 
-先安装 **Node.js 22 或更新版本**。项目后端使用 Node 内置 SQLite，无需运行 `npm install`。
+推荐安装 **[Node.js 24 LTS](https://nodejs.org/en/download)**，已有 **Node.js 22.13+** 也可使用。后端使用内置 `node:sqlite`，从 22.13 起无需实验开关；请实际检查 SQLite 能否加载。依据：[Node.js SQLite 文档](https://nodejs.org/api/sqlite.html)。项目无需 `npm install`，无需构建。
 
-Windows 用户在解压后的项目目录中双击：
-
-```text
-quick-start.cmd
+```bash
+node -e "const {DatabaseSync}=require('node:sqlite'); const db=new DatabaseSync(':memory:'); db.close(); console.log('SQLite OK')"
 ```
 
-这个脚本会自动：
+**首次启动前**，仅在 `.env` 缺失时复制 `.env.example` 为 `.env`，自行设置 `ADMIN_PASSWORD`。首次启动创建用户名 `admin`；已有账户不会因以后修改 `.env` 而改密码。
 
-- 检查本机是否安装 Node.js 和 npm
-- 在缺少 `.env` 时，从 `.env.example` 创建一份
-- 启动本地服务
-- 打开浏览器访问应用
+| 系统 | 快速启动 | 桌面快捷启动 |
+| --- | --- | --- |
+| Windows | 双击 `quick-start.cmd` | 创建指向原文件的 `.lnk`，保留项目工作目录 |
+| macOS | `chmod +x quick-start.command quick-start.sh` 后双击 `.command`，或 `bash quick-start.command` | 创建桌面 `.command`；nvm/fnm 用户用 `NODE_BINARY` 固定已验证的 Node 绝对路径 |
+| Linux | `bash quick-start.sh` | 创建 `Terminal=true` 的 `.desktop`；无图形环境用 `bash quick-start.sh --no-browser` |
 
-默认访问地址：
+脚本检查 Node SQLite、仅在缺失时生成 `.env`，真正监听成功后才尝试打开浏览器。默认地址为 **`http://127.0.0.1:8787`**；已有安装保留原来的地址和端口。终端需保持打开，按 **`Ctrl+C` 停止**。快捷方式的完整步骤和路径问题见 [部署说明](docs/CODEX-DEPLOY.md#4-三个系统怎样快速启动)。
 
-```text
-http://127.0.0.1:8787
-```
-
-关闭快速启动窗口即可停止服务。
-
-首次登录后，在「API 设置」配置自己的图片、视频或聊天渠道，再创建项目。可灵 CLI 渠道按下文完成安装与登录。
+首次登录后创建项目，在右上角「API 设置」配置自己的图片、视频或聊天渠道。可灵 CLI 渠道按下文完成安装与 OAuth 登录。macOS/Linux 提供脚本设计和自动化覆盖，仍需在用户实机验证桌面双击；部署验收不需要付费生成调用。
 
 ## 更新已有安装
 
-Git 用户在项目目录执行：
+先保存工作、停止服务并备份。Git 用户在原项目目录先运行 `git status --short --branch`、`git remote -v` 和 `git config --get-all remote.origin.fetch`，确认 `origin` 是本仓库，并保护本地修改、未跟踪文件和未推送提交，再执行：
 
 ```bash
+git remote set-branches origin master
 git fetch origin --prune
 git switch master
-git pull --ff-only
+git pull --ff-only origin master
 ```
 
-完成后重启服务并刷新浏览器。此前使用开发分支的用户也按上述步骤切换到 `master`。
+第一条将拉取范围设为 `master`，也可修复过去 `--single-branch` 只克隆已删除开发分支导致的 `couldn't find remote ref`；它不会删除本地分支。若本地尚无 `master`，在 `fetch` 成功后将 `git switch master` 换为 `git switch --track origin/master`。
 
-ZIP 用户可从上面的固定链接重新下载。更新前保留本机 `.env`、`.huobao-settings.json`、`data/` 和 `output/`；浏览器里的项目数据也应通过「导出 JSON」备份。这些个人配置和素材不包含在源码下载中。
+完成后重启服务，在原浏览器和地址刷新页面。此前使用开发分支的用户也切换到 `master`；切分支冲突或无法快进时先检查原因，不使用 `reset --hard` 或 `git clean` 覆盖个人改动。详见 [完整更新步骤](docs/CODEX-DEPLOY.md#6-安全更新始终回到-master)。
+
+ZIP 用户从固定链接重新下载，解压检查后更新源码，完整保留本机 `.env`、`.huobao-settings.json`、`data/` 和 `output/`。浏览器项目可额外「导出 JSON」，但它主要保存工作流与素材引用，**不是包含全部图片、视频、图层和 3D 模型的完整素材包**；还需保留原浏览器 localStorage/IndexedDB 和原始素材。`localhost`、`127.0.0.1`、不同端口属于不同数据来源，更新时不要随意换地址或清除网站数据。详见 [数据与备份](docs/CODEX-DEPLOY.md#7-数据在哪里怎样备份)。
 
 ## 手动启动
 
@@ -64,7 +64,7 @@ npm run dev
 http://127.0.0.1:8787
 ```
 
-首次启动会自动创建 admin 账户（用户名 `admin`，密码取 `process.env.ADMIN_PASSWORD || "admin1234"`）。部署到服务器时，可以把 `HOST` 设置为 `0.0.0.0`，再通过反向代理或服务器端口访问。
+手动命令不会自动创建 `.env` 或打开浏览器，请先完成上面的首次配置。个人电脑使用默认回环地址即可；端口占用时先检查是否已有此项目运行，不自动终止未知进程或开放公网。
 
 ## 可灵 CLI 渠道（OAuth）
 
@@ -126,7 +126,11 @@ GPT Image 2 / 2.5 的高清 4K 请求可能超过 Node 原生 `fetch` 的五分�
 public/          # 前端静态文件
 server/          # Node 后端代理 + SQLite 用户/计费
 package.json     # 启动脚本
-quick-start.cmd  # Windows 快速启动脚本
+quick-start.cmd  # Windows 快速启动
+quick-start.command # macOS 快速启动
+quick-start.sh   # Linux / POSIX 快速启动
+scripts/quick-start.js # 三系统共享 Node 启动器
+docs/CODEX-DEPLOY.md # 可复制给 Codex 的完整部署与更新说明
 ```
 
 ## 后端接口

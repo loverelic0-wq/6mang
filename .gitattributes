@@ -1,0 +1,3 @@
+quick-start.cmd text eol=crlf
+quick-start.sh text eol=lf
+quick-start.command text eol=lf
