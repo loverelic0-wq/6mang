@@ -10,6 +10,7 @@ const db = require("./db");
 const { createKlingCli, isKlingProvider } = require("./kling-cli");
 const { isCprtProvider, buildCprtCreatePayload, normalizeCprtTask } = require("./cprt-provider");
 const { imageReferences, isGptImage2Model, selectImageUpstreamRequest } = require("./image-routing");
+const gptImageModels = require("../public/gpt-image-models");
 const { requestText } = require("./upstream-http");
 
 const kling = createKlingCli({ rootDir, errorLogPath: path.join(rootDir, "data", "kling-error.log") });
@@ -25,6 +26,8 @@ const modelCostRules = {
   chat: { default: 1 },
   image: {
     "gpt-image-2": 15,
+    "gpt-image-2.5-flare": 15,
+    "gpt-image-2.5-sunburst": 15,
     "gemini-3-pro-image-preview": 10,
     "gemini-3.1-flash-image-preview": 6,
     "doubao-seedream-5-0-pro-260628": 8,
@@ -206,10 +209,8 @@ const DEFAULT_PROVIDERS = {
         label: "默认图片上游",
         baseUrl: "https://147ai.com/v1",
         apiKey: "",
-        defaultModel: "gpt-image-2",
-        models: [
-          { id: "gpt-image-2", label: "GPT Image 2" },
-        ],
+        defaultModel: gptImageModels.DEFAULT_MODEL,
+        models: gptImageModels.MODELS,
       },
       volc: {
         label: "火山 Seedream",
@@ -884,7 +885,8 @@ async function handleApi(req, res, url) {
     const found = requireUser(req);
     const body = await readJson(req);
     const provider = getProvider("image", body.providerId);
-    const model = String(body.model || provider.defaultModel);
+    const model = gptImageModels.resolveModel(provider, body.model || provider.defaultModel);
+    body.model = model;
     const refImages = imageReferences(body);
     if (isKlingProvider(provider)) {
       const data = await kling.submit({

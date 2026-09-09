@@ -2,9 +2,20 @@
 
 前端 + 后端结构的 AI Canvas 原型。
 
+## 下载最新版本
+
+**`master` 是唯一维护的分支，仓库首页展示的就是最新版本。** 所有功能更新统一合入这里。
+
+- 不熟悉 Git：点击 **[下载最新版 ZIP](https://github.com/loverelic0-wq/6mang/archive/refs/heads/master.zip)**，解压后按下面步骤启动。
+- 使用 Git：运行 `git clone https://github.com/loverelic0-wq/6mang.git`，进入 `6mang` 目录即可。
+
+当前版本包含 GPT Image 2.5 Flare / Sunburst、可灵 CLI、Seedream 专业图片编辑、CPRT 视频、产品换背景和 3D 导演台。
+
 ## 快速启动
 
-Windows 用户可以直接双击：
+先安装 **Node.js 22 或更新版本**。项目后端使用 Node 内置 SQLite，无需运行 `npm install`。
+
+Windows 用户在解压后的项目目录中双击：
 
 ```text
 quick-start.cmd
@@ -24,6 +35,22 @@ http://127.0.0.1:8787
 ```
 
 关闭快速启动窗口即可停止服务。
+
+首次登录后，在「API 设置」配置自己的图片、视频或聊天渠道，再创建项目。可灵 CLI 渠道按下文完成安装与登录。
+
+## 更新已有安装
+
+Git 用户在项目目录执行：
+
+```bash
+git fetch origin --prune
+git switch master
+git pull --ff-only
+```
+
+完成后重启服务并刷新浏览器。此前使用开发分支的用户也按上述步骤切换到 `master`。
+
+ZIP 用户可从上面的固定链接重新下载。更新前保留本机 `.env`、`.huobao-settings.json`、`data/` 和 `output/`；浏览器里的项目数据也应通过「导出 JSON」备份。这些个人配置和素材不包含在源码下载中。
 
 ## 手动启动
 
@@ -60,13 +87,17 @@ npm install -g @klingai/cli-cn
 npm test
 ```
 
-## GPT Image 2 尺寸
+## GPT Image 2.5 模型与尺寸
 
-图片生成、故事板和营销物料节点在选择 `gpt-image-2` 时使用两级尺寸预设：先选 `16:9`、`9:16`、`2:3`、`3:2`、`3:4`、`4:3` 或 `1:1`，再选 `1K`、`2K` 或 `4K`。画布会自动换算并显示实际输出像素，无需用户手算。
+147 图片模型池使用 `gpt-image-2.5-flare`（默认）和 `gpt-image-2.5-sunburst`，节点下拉可切换。模型名本身就是 API 的 `model` ID。原来使用 147 `gpt-image-2` 的节点，在旧 ID 已从该渠道模型池移除后会自动跟随该渠道的新默认模型；其他渠道及仍明确配置的旧模型保持原选择。已有安装需在「API 设置」同步替换模型池，源码预设仅用于首次配置。
+
+两种模型复用文生图 JSON `/images/generations` 与参考图 multipart `/images/edits`，画布积分沿用每次 15（不是 147 上游人民币价格）。2026-09-09 已通过本机 147 `/models` 核对两个 ID；参数兼容性依据 [OpenAI 图片生成文档](https://developers.openai.com/api/docs/guides/image-generation)，尚未进行 147 付费生图验证。
+
+图片生成、故事板和营销物料节点在选择 GPT Image 2 / 2.5 时使用两级尺寸预设：先选 `16:9`、`9:16`、`2:3`、`3:2`、`3:4`、`4:3` 或 `1:1`，再选 `1K`、`2K` 或 `4K`。画布会自动换算并显示实际输出像素，无需用户手算。
 
 所有 21 个组合都满足 147 的限制：最大边不超过 3840px、宽高均为 16px 的倍数、长短边比例不超过 3:1、总像素位于 655,360–8,294,400 之间。例如 `16:9 + 4K` 为 `3840x2160`，`2:3 + 1K` 为 `672x1008`，`1:1 + 4K` 为 `2880x2880`。
 
-GPT Image 2 的高清 4K 请求可能超过 Node 原生 `fetch` 的五分钟等待上限，因此服务端对该模型的 JSON 和参考图请求使用独立的 15 分钟长连接，并把连接拒绝、DNS 和超时错误转换为明确提示。图片 provider 的默认回退项应保持为已配置的 147 上游。
+GPT Image 2 / 2.5 的高清 4K 请求可能超过 Node 原生 `fetch` 的五分钟等待上限，因此服务端对这些模型的 JSON 和参考图请求使用独立的 15 分钟长连接，并把连接拒绝、DNS 和超时错误转换为明确提示。图片 provider 的默认回退项应保持为已配置的 147 上游。
 
 图片扩展节点会在不改变用户所选画面比例的前提下，自动把 GPT Image 2 的输出吸附到合法的 16px 网格；例如 16:9 的上限输出为 `3840x2160`。
 

@@ -696,6 +696,12 @@ function ensureNodeProvider(node) {
   const group = getProviderGroup(kind);
   if (!Object.keys(group.items).length) return;
   const existing = node.data.providerId && group.items[node.data.providerId] ? node.data.providerId : null;
+  if (kind === "image") {
+    const provider = existing
+      ? group.items[existing]
+      : (findProviderForModel(kind, node.data.model)?.item || group.items[group.default]);
+    node.data.model = window.GptImageModels.resolveModel(provider, node.data.model);
+  }
   if (existing) {
     const selected = group.items[existing];
     if (!node.data.model || selected.models?.some((model) => model.id === node.data.model)) return;
@@ -4842,7 +4848,7 @@ function addNode(type, position = getViewportCenter(), data = {}) {
     },
     image: { label: "图片节点", url: false },
     imageCompare: { label: "图片对比", split: 50 },
-    imageExpand: { label: "图片扩展", padL: 0, padR: 0, padT: 0, padB: 0, lockRatio: false, prompt: "", model: "gpt-image-2" },
+    imageExpand: { label: "图片扩展", padL: 0, padR: 0, padT: 0, padB: 0, lockRatio: false, prompt: "", model: getDefaultModel("image") },
     styleTransferConfig: {
       label: "风格迁移",
       model: getDefaultModel("image"),
@@ -5144,15 +5150,14 @@ const fluxImageRatios = [
 ];
 
 function isStandardImageModel(model) {
-  return [
-    "gpt-image-2",
+  return isGptImage2Model(model) || [
     "gemini-3-pro-image-preview",
     "gemini-3.1-flash-image-preview",
   ].includes(normalizeModelValue("image", model));
 }
 
 function isGptImage2Model(model) {
-  return normalizeModelValue("image", model) === "gpt-image-2";
+  return window.GptImageModels.isModel(normalizeModelValue("image", model));
 }
 
 function isSeedream5ImageModel(model) {

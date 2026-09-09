@@ -136,6 +136,8 @@ try {
 
 **`DEFAULT_PROVIDERS`** 常量定义初始模型池（首次启动或迁移失败时用）。新增预设模型时改它。
 
+147 图片预设为 `gpt-image-2.5-flare`（默认）与 `gpt-image-2.5-sunburst`，两者画布费率均为 15。`public/gpt-image-models.js` 是前后端共享模型识别与旧选择迁移入口；仅当 147 provider 已移除旧 `gpt-image-2` 且配置新模型时才迁移，其他 provider 不受影响。尺寸预设与 JSON/multipart 的 15 分钟等待同时覆盖 Image 2 和两种 2.5。已有运行时模型池仍需单独更新，修改初始预设不会覆盖用户配置。
+
 **`/api/settings`** 是 admin-only（普通用户改不了 key），鉴权双通道沿用 `requireAdmin`。
 
 ## 前端（`public/app.js`，单文件 vanilla JS，无 bundler）

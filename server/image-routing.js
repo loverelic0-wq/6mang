@@ -1,4 +1,5 @@
 const { assertSize: assertGptImage2Size } = require("../public/gpt-image-2-sizes");
+const { isModel: isGptImage2Model, resolveModel } = require("../public/gpt-image-models");
 
 function compactPayload(payload) {
   return Object.fromEntries(Object.entries(payload || {}).filter(([, value]) => value !== undefined));
@@ -17,12 +18,8 @@ function isSeedream5ProModel(model) {
   return /^(?:doubao-|dola-)?seedream-5-0-pro-\d+$/i.test(String(model || ""));
 }
 
-function isGptImage2Model(model) {
-  return String(model || "").trim().toLowerCase() === "gpt-image-2";
-}
-
 function selectImageUpstreamRequest(provider, body = {}) {
-  const model = String(body.model || provider?.defaultModel || "");
+  const model = resolveModel(provider, body.model || provider?.defaultModel || "");
   const refs = imageReferences(body);
   const basePayload = compactPayload({ ...body, providerId: undefined, model });
 
