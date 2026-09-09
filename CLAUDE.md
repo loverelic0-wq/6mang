@@ -8,7 +8,7 @@
 
 ## 启动
 
-- `npm run dev` / `npm start` —— 两条都是 `node server/server.js`，**没有** 构建步骤、测试、lint。
+- `npm run dev` / `npm start` —— 两条都是 `node server/server.js`，没有构建步骤；`npm test` 运行 `node --test server/*.test.js`。
 - `quick-start.cmd` —— Windows 一键启动：缺 `.env` 时从 `.env.example` 生成，启动后浏览器自动打开 `http://${HOST}:${PORT}`（默认 `127.0.0.1:8787`）。
 - **Node 22+ 必需**：`server/db.js` 使用 `require("node:sqlite")`（Node 22 起内置）。之前 README 说的 "Node 18+" 已经不准确。
 - **`node_modules` 不存在也是对的**：项目零 npm 依赖，所有功能用 Node 内置模块（`http` / `node:sqlite` / `crypto` / 全局 `fetch`）。不要加 Express、dotenv、bcrypt、better-sqlite3 等。
@@ -28,7 +28,7 @@
 
 ### 鉴权 + 计费（核心，文档之前完全没写）
 
-**所有出钱的 API 都必须先 `requireUser(req)`**（401 if 没登录）。处理流程是固定三段式：
+**所有调用生成服务的 API 都必须先 `requireUser(req)`**（401 if 没登录）。普通 HTTP provider 的处理流程是固定三段式：
 
 ```
 db.adjustBalance(-cost)   // 先扣，不够会抛 402
@@ -43,7 +43,7 @@ try {
 }
 ```
 
-**修改任何调上游的接口时，必须保持「先扣 → try → 失败退款 + 失败记账」结构。** 漏退款 = 用户白付钱；漏 try/catch = 调用失败但钱已扣。
+**修改普通 HTTP provider 的接口时，必须保持「先扣 → try → 失败退款 + 失败记账」结构。** 漏退款 = 用户白付钱；漏 try/catch = 调用失败但钱已扣。唯一例外是托管的 `adapter: "kling-cli"` provider：它使用用户本机可灵 OAuth/灵感值，必须在扣画布余额前分流，不写 `transactions` / `api_usage`。
 
 **计费表** 写死在 `server.js` 顶部 `modelCostRules`：
 - `chat`: 默认 1（覆盖 `/api/chat/polish` 和 `/api/chat/optimize-prompt`）
@@ -78,13 +78,34 @@ try {
 所有图像/视频上游统一走 OpenAI 兼容协议（`/images/generations` + `/images/edits` + `/video/*`）。`server.js` 里 `/api/images/generations` 和 `/api/video/create` 做的模型嗅探：
 
 1. **图像 - 文生图（默认）** —— JSON body 打到 `/images/generations`。
-2. **图像 - 有参考图** —— 改走 `/images/edits`（multipart，`imageSourceToBlob` 把 data URL / http URL 转 Blob）；多图用 `image[]` 字段，单图用 `image`（按 NewAPI 文档推荐做法）。
+2. **图像 - 有参考图** —— 通用 Provider 改走 `/images/edits`（multipart，`imageSourceToBlob` 把 data URL / http URL 转 Blob）；火山方舟 Provider 仍以 JSON `image` 字段走 `/images/generations`，由 `server/image-routing.js` 统一选择协议。通用多图用 `image[]` 字段，单图用 `image`。
 3. **视频 - Sora**（`isSoraModel`，模型名以 `sora` 开头）—— 用 `{prompt, size, seconds, input_reference}`（参考图取 `images[0]`）。
 4. **视频 - 其他**（如 Veo、可灵等）—— 用 `{prompt, aspect_ratio, duration, images[], enable_upsample, enhance_prompt}`。`sizeToAspectRatio()` 把 `1280x720` 这种尺寸转成 `16:9`。
 
 **模型→上游的分配靠 providerId 显式路由**（不再按模型名前缀嗅探）。前端调任何花钱接口都必须在 body / query 里带上节点选中的 `providerId`，后端 `getProvider(kind, providerId)` 据此挑出 baseUrl/apiKey；`providerId` 为空回退到该 kind 的 `default` 子类。**不要再加 `pickXxxService` 这种按模型名硬编码路由的函数。**
 
 **Midjourney** 是它自己的提交-轮询协议：`POST /mj/submit/imagine` 返回 `code` + `result`（taskId），前端轮询 `GET /mj/task/<id>/fetch`。响应 `code` 中 `1` 和 `22` 都算成功（22 是排队中），`24` 映射成 HTTP 402（额度不足）。MJ 路由同样接 `providerId`。
+
+### 可灵 CLI 托管 provider
+
+`server/kling-cli.js` 是 `@klingai/cli-cn` 的安全进程适配器：直接 `spawn(process.execPath, [cliScript, ...args])`，不经过 shell；统一处理超时、JSON、OAuth 单例、data URL 临时文件、任务查询和错误。默认自动发现全局 npm 安装，也可用 `KLING_CLI_JS` 指定入口。
+
+- 图片/视频配置中始终注入 id 为 `kling-cli`、`adapter: "kling-cli"`、`managed: true` 的 provider；它不允许在设置页修改 Base URL/API Key 或删除。
+- `who_am_i --quiet` 是能力真源，`publicProvidersStatus()` 把当前账号的模型、工具、参数、默认值、枚举值和素材槽位动态合并给前端；不要写死可灵模型表。
+- OAuth 由 `/api/kling/login|logout|status|refresh` 驱动。Token 只由 CLI 写入 `~/.kling/.credentials`，服务端和前端都不读取、不复制、不落库。
+- `/api/images/generations` 根据参考图选择 `text_to_image` / `image_to_image`；`/api/video/create` 选择 `text_to_video` / `image_to_video`；结果统一经 `/api/kling/tasks/:id` 轮询回现有输出节点。
+- 可灵请求仍要求画布用户登录，但必须在 `db.adjustBalance()` 前分支；`usesCanvasBilling(provider)` 是计费边界的显式判定。
+- `public/kling-provider.js` 是无构建 UMD helper，负责能力过滤、动态字段、参数序列化和必填素材验证；`public/app.js` 只负责把它接到既有节点与设置面板。
+
+### Seedream 5.0 Pro 图片工作流
+
+- 火山图片 Provider `volc` 固定使用 Ark `/images/generations` JSON 协议；普通文生图、单图编辑和最多 10 张参考图融合都不切到 multipart `/images/edits`。协议选择和服务端前置校验集中在 `server/image-routing.js`。
+- `doubao-seedream-5-0-pro-260628` 只使用官方 1K/2K 精确像素尺寸；支持 `png/jpeg` 与 `optimize_prompt_options.mode=standard|fast`，必须省略 `sequential_image_generation`。Seedream 5.0 Lite 保留原 2K/3K/4K 尺寸和 `sequential_image_generation:"disabled"`。
+- `seedreamEdit` 是 Pro 专用的空间标注编辑节点。标记数据用归一化矢量坐标保存；生成时才把紫色点/框/箭头/画笔烘焙到第一张参考图，最多再接 9 张额外参考图。
+- `layerSeparation` 发送 `layer_decomposition:true`、单张 `image`、`size=auto|1K|1.5K|2K`、PNG 输出；服务端在扣费前验证必须是火山 Provider、Pro 模型和恰好一张图。
+- 图层响应首项是补全背景，其余项按 `z_index` 与 `bounding_box.absolute` 转为 `layerGroup`。背景及透明 PNG 立即下载到 IndexedDB，节点状态只保存 `idb-image:<assetId>` 和坐标/显隐/锁定/透明度等轻量元数据。
+- `public/seedream-tools.js` 是无构建 UMD helper，也是 Node 行为测试的真实入口；请求参数、响应解析、标注命中和图层变换优先在这里实现，避免用源码字符串测试替代行为测试。
+- 图层分离没有本地模拟结果：未配置火山图片 Key 时必须明确报错，不能把扁平占位图伪装成可编辑图层。
 
 ### `/api/image-proxy`（SSRF 保护）
 
@@ -115,6 +136,8 @@ try {
 
 **`DEFAULT_PROVIDERS`** 常量定义初始模型池（首次启动或迁移失败时用）。新增预设模型时改它。
 
+147 图片预设为 `gpt-image-2.5-flare`（默认）与 `gpt-image-2.5-sunburst`，两者画布费率均为 15。`public/gpt-image-models.js` 是前后端共享模型识别与旧选择迁移入口；仅当 147 provider 已移除旧 `gpt-image-2` 且配置新模型时才迁移，其他 provider 不受影响。尺寸预设与 JSON/multipart 的 15 分钟等待同时覆盖 Image 2 和两种 2.5。已有运行时模型池仍需单独更新，修改初始预设不会覆盖用户配置。
+
 **`/api/settings`** 是 admin-only（普通用户改不了 key），鉴权双通道沿用 `requireAdmin`。
 
 ## 前端（`public/app.js`，单文件 vanilla JS，无 bundler）
@@ -128,6 +151,13 @@ try {
 | `promptOptimizer` | 提示词优化 | 调 `/api/chat/optimize-prompt`，输出 6 字段 |
 | `imageConfig` | 文生图配置 | `generateImage` |
 | `storyboardConfig` | 故事板生成 | `generateStoryboard`，会展开多帧 |
+| `faceSwapConfig` | 换脸 | `generateFaceSwap`；接两张图片，按连线顺序 ①底图(保留)/②脸源(取脸)；指令式编辑（复用 `/api/images/generations` 多参考图 + `FACE_SWAP_PROMPT`，让模型在底图光照下重生成脸而非抠图粘贴），输出尺寸用 `nearestByAspect` 跟随底图比例；零后端改动，按 image 费率计费 |
+| `styleTransferConfig` | 风格迁移 | `generateStyleTransfer`；严格接两张图片，按连线顺序 ①内容图(保留主体/构图)/②风格参考(只取画风)；轻度/标准/强烈三档提示词由 `public/style-transfer.js` 生成，输出比例跟随内容图；复用现有图片生成、鉴权、计费、失败退款与历史归档链路 |
+| `materialTransferConfig` | 材质迁移 | `generateMaterialTransfer`；严格接两路素材，按连线顺序 ①主体/结构(锁定形体、视角、细节与场景)/②材质参考(只取颜色、纹理、粗糙度、光泽、反射与透光等材质属性)；轻度/标准/强烈三档提示词由 `public/material-transfer.js` 生成，输出比例跟随主体输入；支持图片、图层组和 3D 模型预览截图，复用现有图片生成、鉴权、计费、失败退款与历史归档链路 |
+| `seedreamEdit` | 精确图片编辑 | Seedream 5.0 Pro 专用；空间标注 + 最多 10 图参考编辑 |
+| `productBackgroundConfig` | 产品换背景 | `generateProductBackground`；双图直接编辑，一次完成背景替换与光影统一。输入可节点内上传或连线；`public/product-background.js` 按边标签“产品图/背景图”固定角色，普通无角色连线按顺序填空位。请求始终产品在前、背景在后；比例可跟随任一输入。复用现有鉴权、计费、编辑接口和结果/历史存储；没有抠图、mask 或本地模拟结果。运行集合防止同一节点重复提交，异常后释放重试。 |
+| `layerSeparation` | 智能图层分离 | Seedream 5.0 Pro 原生图层分离配置；只接单图 |
+| `layerGroup` | 图层组 | IndexedDB 图层文档；支持移动、等比缩放、排序、显隐、锁定、透明度、重命名、合成与提取 |
 | `videoConfig` | 视频生成配置 | `generateVideo` |
 | `image` | 图片节点 / 载入图像 / 历史图片 | `data.url=false` 是待上传状态 |
 | `video` | 视频节点 / 载入视频 | 异步任务 `taskId` 轮询；空态支持 点击/拖入/粘贴 载入本地视频（blob 走 IndexedDB，`idb-image:` 哨兵） |

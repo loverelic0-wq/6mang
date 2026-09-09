@@ -7,19 +7,30 @@ const rootDir = path.resolve(__dirname, "..");
 loadDotEnv(path.join(rootDir, ".env"));
 
 const db = require("./db");
+const { createKlingCli, isKlingProvider } = require("./kling-cli");
+const { isCprtProvider, buildCprtCreatePayload, normalizeCprtTask } = require("./cprt-provider");
+const { imageReferences, isGptImage2Model, selectImageUpstreamRequest } = require("./image-routing");
+const gptImageModels = require("../public/gpt-image-models");
+const { requestText } = require("./upstream-http");
+
+const kling = createKlingCli({ rootDir, errorLogPath: path.join(rootDir, "data", "kling-error.log") });
 
 const publicDir = path.join(rootDir, "public");
 const runtimeSettingsPath = path.join(rootDir, ".huobao-settings.json");
 const port = Number(process.env.PORT || 8787);
 const host = process.env.HOST || "127.0.0.1";
 const adminToken = process.env.ADMIN_TOKEN || "";
+const GPT_IMAGE_2_TIMEOUT_MS = 15 * 60 * 1000;
 
 const modelCostRules = {
   chat: { default: 1 },
   image: {
     "gpt-image-2": 15,
+    "gpt-image-2.5-flare": 15,
+    "gpt-image-2.5-sunburst": 15,
     "gemini-3-pro-image-preview": 10,
     "gemini-3.1-flash-image-preview": 6,
+    "doubao-seedream-5-0-pro-260628": 8,
     "midjourney": 15,
     "niji-journey": 15,
     default: 8,
@@ -59,6 +70,86 @@ const PROMPT_OPTIMIZER_SYSTEM = `你是顶级的中文 AI 绘画提示词专家�
 - 总字数控制在 600 字以内，优先级：主体 > 结构 > 材质 > 光影 > 风格 > 构图。
 - 禁止编造原始输入中不存在的关键事实（人物身份、品牌、地点），可补充氛围/材质/光影等通用视觉细节。
 - 只返回 JSON，禁止任何额外文字。`;
+
+const STORYBOARD_ASSISTANT_SYSTEM = `你是一位专业的影视分镜导演助手，兼具电影导演、分镜设计师、镜头语言顾问、AI视觉提示词专家的能力。
+
+你的任务不是简单罗列镜头，而是根据用户提供的故事、剧本、广告概念、情绪主题或已有关键画面，设计出具有叙事逻辑、情绪推进、空间调度、镜头节奏与AI生成可执行性的分镜方案。
+
+你必须遵循以下原则：
+
+1. 优先理解剧情目标
+- 先判断场景的核心事件、情绪阶段、信息重点、主观视角
+- 明确这一场戏是交代、推进、转折、爆发还是收束
+
+2. 分镜必须具备镜头语言逻辑
+- 合理使用远景、全景、中景、近景、特写
+- 明确机位、角度、视线关系、空间关系
+- 尽量保证镜头组接自然，符合剪辑逻辑
+- 涉及对话场景时，注意180度法则、正反打逻辑和视线匹配
+- 涉及动作场景时，注意动作起承转合与连接镜头
+- 适当加入环境镜头、空镜、反应镜头、细节镜头来增强节奏与氛围
+
+3. 必须服务于AI影视生成
+- 输出的镜头描述应适合图像模型和视频模型理解
+- 避免过度抽象、无法具象化的描述
+- 角色、场景、服装、道具、时间、天气、光线要尽量保持一致
+- 对容易导致角色漂移或场景不一致的镜头，主动进行拆分和约束
+- 能区分关键画面镜头、补镜、转场镜头、氛围镜头
+
+4. 输出要结构化、可执行
+默认输出包含以下字段：
+- 镜头编号
+- 镜头类型 / 景别
+- 画面内容
+- 机位 / 运镜
+- 情绪 / 叙事作用
+- 时长建议
+- AI生成建议
+必要时追加：
+- Midjourney提示词
+- 视频生成提示词
+- 转场建议
+- 音效 / 配乐建议
+- 剪辑节奏建议
+
+5. 当用户输入较模糊时
+- 先自动补足合理的影视化设定
+- 不要停留在空泛描述
+- 直接给出可用方案，并标明关键假设
+- 如果用户输入已经包含具体人物、地点、事件、时间、天气、道具或情绪，必须保留这些事实，不能改写成无关的通用场景
+
+6. 输出风格要求
+- 语言专业但清晰
+- 注重镜头背后的叙事目的
+- 避免堆砌华丽词藻
+- 优先可拍、可生成、可剪辑
+
+工作流程规则：
+
+当用户给出故事或场景时，按以下顺序工作：
+
+第一步：先提炼场景目标
+- 这场戏讲什么
+- 观众要接收到什么
+- 情绪如何变化
+
+第二步：设计镜头结构
+- 先给出镜头组思路
+- 再展开成逐镜分镜
+
+第三步：判断哪些镜头是关键画面
+- 哪些适合先生成静帧
+- 哪些适合后续补动态
+
+第四步：如用户需要，继续输出：
+- AI绘图提示词
+- 视频提示词
+- 剪辑节奏建议
+- 配音文案
+- 配乐方向
+
+优先识别最值得先生成的关键镜头，帮助用户先建立视觉锚点，再补充过渡镜头与连接镜头。
+在连续镜头中，主动维护角色外观、服装、场景材质、光线氛围、镜头语言风格的一致性，避免AI生成中的视觉漂移。`;
 
 function parseOptimizedPrompt(raw) {
   const empty = { subject: "", structure: "", material: "", lighting: "", style: "", composition: "" };
@@ -118,9 +209,16 @@ const DEFAULT_PROVIDERS = {
         label: "默认图片上游",
         baseUrl: "https://147ai.com/v1",
         apiKey: "",
-        defaultModel: "gpt-image-2",
+        defaultModel: gptImageModels.DEFAULT_MODEL,
+        models: gptImageModels.MODELS,
+      },
+      volc: {
+        label: "火山 Seedream",
+        baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+        apiKey: "",
+        defaultModel: "doubao-seedream-5-0-pro-260628",
         models: [
-          { id: "gpt-image-2", label: "GPT Image 2" },
+          { id: "doubao-seedream-5-0-pro-260628", label: "豆包 Seedream 5.0 Pro（火山引擎）" },
         ],
       },
     },
@@ -180,7 +278,29 @@ server.listen(port, host, () => {
 });
 
 function cloneDefaultProviders() {
-  return JSON.parse(JSON.stringify(DEFAULT_PROVIDERS));
+  return ensureManagedProviders(JSON.parse(JSON.stringify(DEFAULT_PROVIDERS)));
+}
+
+function managedKlingProvider() {
+  return {
+    label: "可灵 CLI",
+    adapter: "kling-cli",
+    managed: true,
+    baseUrl: "",
+    apiKey: "",
+    defaultModel: "",
+    models: [],
+  };
+}
+
+function ensureManagedProviders(providers) {
+  for (const kind of ["image", "video"]) {
+    if (!providers[kind]) providers[kind] = { default: "kling-cli", items: {} };
+    if (!providers[kind].items) providers[kind].items = {};
+    providers[kind].items["kling-cli"] = managedKlingProvider();
+    if (!providers[kind].default) providers[kind].default = "kling-cli";
+  }
+  return providers;
 }
 
 function loadRuntimeSettings() {
@@ -268,12 +388,14 @@ function normalizeProviders(input) {
     const def = incoming.default && items[incoming.default] ? incoming.default : Object.keys(items)[0];
     out[kind] = { default: def, items };
   }
-  return out;
+  return ensureManagedProviders(out);
 }
 
 function normalizeProviderItem(pdef) {
   return {
     label: String(pdef.label || ""),
+    adapter: pdef.adapter === "kling-cli" ? "kling-cli" : "http",
+    managed: Boolean(pdef.managed || pdef.adapter === "kling-cli"),
     baseUrl: String(pdef.baseUrl || ""),
     apiKey: String(pdef.apiKey || ""),
     defaultModel: String(pdef.defaultModel || ""),
@@ -299,22 +421,53 @@ function getProvider(kind, providerId) {
     error.statusCode = 400;
     throw error;
   }
-  return { kind, id, ...item };
+  return { kind, id, ...item, apiKey: resolveProviderApiKey(kind, id, item) };
 }
 
-function publicProvidersStatus() {
+function resolveProviderApiKey(kind, id, item) {
+  if (item.apiKey) return item.apiKey;
+  if (kind === "image" && id === "volc") {
+    return runtimeSettings.providers?.video?.items?.volc?.apiKey || "";
+  }
+  return "";
+}
+
+async function publicProvidersStatus() {
+  const klingStatus = await kling.status();
+  let klingCapabilities = null;
+  if (klingStatus.authenticated) {
+    try { klingCapabilities = await kling.capabilities(); } catch {}
+  }
   const out = {};
   for (const kind of ["chat", "image", "video"]) {
     const group = runtimeSettings.providers?.[kind] || { default: "", items: {} };
     const items = {};
     for (const [id, item] of Object.entries(group.items || {})) {
+      if (isKlingProvider(item)) {
+        const models = klingCapabilities?.providers?.[kind]?.models || [];
+        items[id] = {
+          label: item.label,
+          adapter: "kling-cli",
+          managed: true,
+          baseUrl: "",
+          defaultModel: models.some((model) => model.id === item.defaultModel) ? item.defaultModel : models[0]?.id || "",
+          models,
+          configured: Boolean(klingStatus.installed && klingStatus.authenticated),
+          installed: Boolean(klingStatus.installed),
+          authenticated: Boolean(klingStatus.authenticated),
+          apiKeyMasked: "",
+        };
+        continue;
+      }
       items[id] = {
         label: item.label,
+        adapter: item.adapter || "http",
+        managed: false,
         baseUrl: item.baseUrl,
         defaultModel: item.defaultModel,
         models: item.models,
-        configured: Boolean(item.apiKey),
-        apiKeyMasked: maskApiKey(item.apiKey),
+        configured: Boolean(resolveProviderApiKey(kind, id, item)),
+        apiKeyMasked: maskApiKey(resolveProviderApiKey(kind, id, item)),
       };
     }
     out[kind] = { default: group.default, items };
@@ -353,6 +506,10 @@ function applyProvidersUpdate(incoming) {
       if (!pdef || typeof pdef !== "object") continue;
       const id = String(pid);
       const previous = existingKind.items?.[id];
+      if (id === "kling-cli" && ["image", "video"].includes(kind)) {
+        items[id] = managedKlingProvider();
+        continue;
+      }
       const merged = normalizeProviderItem(pdef);
       if (pdef.apiKey === API_KEY_KEEP_SENTINEL) {
         merged.apiKey = previous?.apiKey || "";
@@ -364,10 +521,11 @@ function applyProvidersUpdate(incoming) {
       next[kind] = existingKind;
       continue;
     }
+    if (["image", "video"].includes(kind)) items["kling-cli"] = managedKlingProvider();
     const def = incomingKind.default && items[incomingKind.default] ? incomingKind.default : Object.keys(items)[0];
     next[kind] = { default: def, items };
   }
-  runtimeSettings = { providers: next };
+  runtimeSettings = { providers: ensureManagedProviders(next) };
   saveRuntimeSettings();
 }
 
@@ -438,6 +596,13 @@ function requireAdmin(req) {
   const supplied = (req.headers["x-admin-token"] || "").toString();
   if (adminToken && supplied === adminToken) return true;
   return false;
+}
+
+function requireAdminOrThrow(req) {
+  if (requireAdmin(req)) return;
+  const error = new Error("需要管理员权限");
+  error.statusCode = 403;
+  throw error;
 }
 
 async function handleApi(req, res, url) {
@@ -553,8 +718,54 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/kling/status" && req.method === "GET") {
+    requireAdminOrThrow(req);
+    const refresh = url.searchParams.get("refresh") === "1";
+    sendJson(res, 200, await kling.status({ refresh }));
+    return;
+  }
+
+  if (url.pathname === "/api/kling/login" && req.method === "POST") {
+    requireAdminOrThrow(req);
+    sendJson(res, 202, kling.startLogin());
+    return;
+  }
+
+  if (url.pathname === "/api/kling/logout" && req.method === "POST") {
+    requireAdminOrThrow(req);
+    sendJson(res, 200, await kling.logout());
+    return;
+  }
+
+  if (url.pathname === "/api/kling/refresh" && req.method === "POST") {
+    requireAdminOrThrow(req);
+    const status = await kling.status({ refresh: true });
+    const account = status.authenticated ? await kling.account() : null;
+    sendJson(res, 200, { ...status, account });
+    return;
+  }
+
+  if (url.pathname === "/api/kling/account" && req.method === "GET") {
+    requireAdminOrThrow(req);
+    sendJson(res, 200, await kling.account());
+    return;
+  }
+
+  if (url.pathname === "/api/kling/tools" && req.method === "GET") {
+    requireAdminOrThrow(req);
+    sendJson(res, 200, await kling.tools());
+    return;
+  }
+
+  const klingTaskMatch = /^\/api\/kling\/tasks\/([^/]+)$/.exec(url.pathname);
+  if (klingTaskMatch && req.method === "GET") {
+    requireUser(req);
+    sendJson(res, 200, await kling.queryTask(decodeURIComponent(klingTaskMatch[1])));
+    return;
+  }
+
   if (url.pathname === "/api/status" && req.method === "GET") {
-    sendJson(res, 200, { providers: publicProvidersStatus() });
+    sendJson(res, 200, { providers: await publicProvidersStatus() });
     return;
   }
 
@@ -565,7 +776,7 @@ async function handleApi(req, res, url) {
     }
     const body = await readJson(req);
     applyProvidersUpdate(body.providers);
-    sendJson(res, 200, { providers: publicProvidersStatus() });
+    sendJson(res, 200, { providers: await publicProvidersStatus() });
     return;
   }
 
@@ -606,6 +817,39 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/chat/storyboard-assistant" && req.method === "POST") {
+    const found = requireUser(req);
+    const body = await readJson(req);
+    const provider = getProvider("chat", body.providerId);
+    const model = body.model || provider.defaultModel;
+    const cost = costFor("chat", model);
+    db.adjustBalance({ userId: found.user.id, delta: -cost, type: "spend", description: `storyboard-assistant ${model}` });
+    try {
+      const userText = [
+        body.text ? `用户故事/场景（必须围绕以下内容设计，不得替换成无关场景）：\n${body.text}` : "",
+        body.requirements ? `补充要求：\n${body.requirements}` : "",
+      ].filter(Boolean).join("\n\n");
+      const data = await n1nFetch(provider, "/chat/completions", {
+        method: "POST",
+        body: {
+          model,
+          messages: [
+            { role: "system", content: STORYBOARD_ASSISTANT_SYSTEM },
+            { role: "user", content: userText || "请根据一个较模糊的影视场景创意，自动补足合理设定并输出可执行分镜方案。" },
+          ],
+          max_tokens: 4000,
+        },
+      });
+      db.recordApiUsage({ userId: found.user.id, route: "chat/storyboard-assistant", model, cost, status: "ok" });
+      sendJson(res, 200, { text: data?.choices?.[0]?.message?.content?.trim() || "" });
+    } catch (error) {
+      db.adjustBalance({ userId: found.user.id, delta: cost, type: "refund", description: `refund storyboard-assistant ${model}: ${error.message}` });
+      db.recordApiUsage({ userId: found.user.id, route: "chat/storyboard-assistant", model, cost: 0, status: `error: ${error.message}` });
+      throw error;
+    }
+    return;
+  }
+
   if (url.pathname === "/api/chat/optimize-prompt" && req.method === "POST") {
     const found = requireUser(req);
     const body = await readJson(req);
@@ -641,16 +885,30 @@ async function handleApi(req, res, url) {
     const found = requireUser(req);
     const body = await readJson(req);
     const provider = getProvider("image", body.providerId);
-    const model = String(body.model || provider.defaultModel);
+    const model = gptImageModels.resolveModel(provider, body.model || provider.defaultModel);
+    body.model = model;
+    const refImages = imageReferences(body);
+    if (isKlingProvider(provider)) {
+      const data = await kling.submit({
+        tool: refImages.length ? "image_to_image" : "text_to_image",
+        model,
+        prompt: String(body.prompt || ""),
+        params: body.dynamicParams,
+        images: refImages,
+        rationale: body.rationale,
+      });
+      sendJson(res, 200, data);
+      return;
+    }
+    const upstreamRequest = isChatImageModel(model) ? null : selectImageUpstreamRequest(provider, body);
     const cost = costFor("image", model);
     db.adjustBalance({ userId: found.user.id, delta: -cost, type: "spend", description: `image ${model}` });
     try {
       let data;
-      const refImages = Array.isArray(body.image) ? body.image.filter(Boolean) : [];
       if (isChatImageModel(model)) {
         // gemini 香蕉系（如 147ai.com）不走 images 端点，改用 /chat/completions 对话生图
         data = await chatImageGenerate(provider, model, refImages, body);
-      } else if (refImages.length) {
+      } else if (upstreamRequest.mode === "multipart") {
         const form = new FormData();
         form.append("model", model);
         form.append("prompt", String(body.prompt || ""));
@@ -675,17 +933,14 @@ async function handleApi(req, res, url) {
           error.statusCode = 400;
           throw error;
         }
-        data = await n1nFetchForm(provider, "/images/edits", form);
-      } else {
-        const payload = compactPayload({
-          ...body,
-          model,
-          prompt: body.prompt,
+        data = await n1nFetchForm(provider, upstreamRequest.route, form, {
+          timeoutMs: isGptImage2Model(model) ? GPT_IMAGE_2_TIMEOUT_MS : 0,
         });
-        delete payload.providerId;
-        data = await n1nFetch(provider, "/images/generations", {
+      } else {
+        data = await n1nFetch(provider, upstreamRequest.route, {
           method: "POST",
-          body: payload,
+          body: upstreamRequest.payload,
+          timeoutMs: isGptImage2Model(model) ? GPT_IMAGE_2_TIMEOUT_MS : 0,
         });
       }
       db.recordApiUsage({ userId: found.user.id, route: "images/generations", model, cost, status: "ok" });
@@ -753,22 +1008,54 @@ async function handleApi(req, res, url) {
     const body = await readJson(req);
     const provider = getProvider("video", body.providerId);
     const model = body.model || provider.defaultModel;
+    if (isKlingProvider(provider)) {
+      const images = Array.isArray(body.images) ? body.images.filter(Boolean) : [];
+      const videos = Array.isArray(body.videos) ? body.videos.filter(Boolean) : [];
+      if (videos.length) {
+        const error = new Error("可灵 CLI 当前未声明参考视频输入，请改用图片参考或切换其他视频渠道");
+        error.statusCode = 400;
+        throw error;
+      }
+      const data = await kling.submit({
+        tool: images.length ? "image_to_video" : "text_to_video",
+        model,
+        prompt: String(body.prompt || ""),
+        params: body.dynamicParams,
+        images,
+        rationale: body.rationale,
+      });
+      sendJson(res, 200, data);
+      return;
+    }
     const cost = costFor("video", model);
     db.adjustBalance({ userId: found.user.id, delta: -cost, type: "spend", description: `video ${model}` });
     try {
-      // 参考视频是本地 data URL 时先传 COS 换公网外链（Ark 只认 http 地址）
-      if (isVolcArkProvider(provider) && Array.isArray(body.videos) && body.videos.length) {
+      // Ark 与 CPRT 都只接受公网素材；本地 data URL 先传 COS 换公网外链。
+      if ((isVolcArkProvider(provider) || isCprtProvider(provider)) && Array.isArray(body.videos) && body.videos.length) {
         body.videos = await Promise.all(body.videos.map((v) => ensurePublicMediaUrl(v, "video")));
       }
-      const data = isVolcArkProvider(provider)
-        ? await n1nFetch(provider, "/contents/generations/tasks", {
+      if (isCprtProvider(provider) && Array.isArray(body.images) && body.images.length) {
+        body.images = await Promise.all(body.images.map((v) => ensurePublicMediaUrl(v, "image")));
+      }
+      let data;
+      if (isCprtProvider(provider)) {
+        const raw = await n1nFetch(provider, "/chat/asyncTask", {
+            method: "POST",
+            body: buildCprtCreatePayload(model, body),
+          });
+        data = normalizeCprtTask(raw);
+        if (!data.id) throw new Error("智算谷创建响应未返回任务 ID");
+      } else if (isVolcArkProvider(provider)) {
+        data = await n1nFetch(provider, "/contents/generations/tasks", {
             method: "POST",
             body: volcVideoCreatePayload(model, body),
-          })
-        : await n1nFetch(provider, "/video/create", {
+          });
+      } else {
+        data = await n1nFetch(provider, "/video/create", {
             method: "POST",
             body: buildVideoCreatePayload(model, body),
           });
+      }
       db.recordApiUsage({ userId: found.user.id, route: "video/create", model, cost, status: "ok" });
       sendJson(res, 200, data);
     } catch (error) {
@@ -779,6 +1066,7 @@ async function handleApi(req, res, url) {
         model,
         videoMode: body.videoMode,
         ark: isVolcArkProvider(provider),
+        cprt: isCprtProvider(provider),
         images: Array.isArray(body.images) ? body.images.length : 0,
         videos: vids.length,
         videosAsDataUrl: dataUrlVids,
@@ -801,6 +1089,11 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/history/file" && req.method === "GET") {
+    serveHistoryFile(req, url, res);
+    return;
+  }
+
   if (url.pathname === "/api/video/query" && req.method === "GET") {
     const id = url.searchParams.get("id");
     if (!id) {
@@ -809,7 +1102,12 @@ async function handleApi(req, res, url) {
     }
     const provider = getProvider("video", url.searchParams.get("providerId"));
     let data;
-    if (isVolcArkProvider(provider)) {
+    if (isKlingProvider(provider)) {
+      data = await kling.queryTask(id);
+    } else if (isCprtProvider(provider)) {
+      const raw = await n1nFetch(provider, `/chat/asyncTask/${encodeURIComponent(id)}`, { method: "GET" });
+      data = normalizeCprtTask(raw, id);
+    } else if (isVolcArkProvider(provider)) {
       const raw = await n1nFetch(provider, `/contents/generations/tasks/${encodeURIComponent(id)}`, { method: "GET" });
       const st = String(raw?.status || "").toLowerCase();
       // 翻译成前端契约：succeeded 时给 video_url；cancelled/expired 归一成 failed
@@ -1007,7 +1305,8 @@ async function ensurePublicMediaUrl(src, kindHint = "video") {
   if (/^https?:\/\//i.test(s)) return s;
   if (!/^data:/i.test(s)) return s;
   if (!cosConfigured()) {
-    throw new Error("本地视频需先上传对象存储，但服务器未配置 COS_*（见 .env.example）");
+    const mediaLabel = kindHint === "video" ? "视频" : "图片";
+    throw new Error(`本地${mediaLabel}需先上传对象存储，但服务器未配置 COS_*（见 .env.example）`);
   }
   const parsed = parseDataUrl(s);
   if (!parsed) throw new Error("无法解析素材 data URL");
@@ -1053,7 +1352,7 @@ function volcVideoCreatePayload(model, body) {
   return compactPayload({
     model,
     content,
-    resolution: volcResolution(body.size),
+    resolution: body.resolution || volcResolution(body.size),
     // 前端直接传宽高比（含 adaptive=跟随参考图）；旧 body 兜底
     ratio: body.ratio || body.aspect_ratio || sizeToAspectRatio(body.size) || "16:9",
     duration: Math.max(4, Math.min(15, seconds)),
@@ -1148,8 +1447,87 @@ async function saveHistoryFile(body) {
   if (manifest.items.length > 500) manifest.items.length = 500;
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 
-  return { ok: true, folder, filename };
+  const fileUrl = `/api/history/file?folder=${encodeURIComponent(folder)}&name=${encodeURIComponent(filename)}`;
+  return { ok: true, folder, filename, historyId, fileUrl };
 }
+
+// 把已落盘的历史素材（output/<folder>/<filename>）回流给前端播放/预览。
+// 上游视频地址是临时签名链接，刷新后必失效；本地文件才是持久来源。
+function serveHistoryFile(req, url, res) {
+  let folder = String(url.searchParams.get("folder") || "");
+  let name = String(url.searchParams.get("name") || "");
+  // 旧历史记录只存了 historyId，没有 folder/name —— 用 projectId/projectName 反推目录、查 manifest 拿文件名。
+  if (!folder) {
+    folder = sanitizeProjectFolder(url.searchParams.get("projectName") || "", url.searchParams.get("projectId") || "");
+  }
+  if (!name) {
+    const historyId = String(url.searchParams.get("historyId") || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 16);
+    if (historyId && folder && !/[\\/]/.test(folder) && !folder.includes("..")) {
+      try {
+        const manifest = JSON.parse(fs.readFileSync(path.join(historyRootDir, folder, "manifest.json"), "utf8"));
+        const hit = (manifest.items || []).find((it) => String(it.id) === historyId && it.filename);
+        if (hit) name = hit.filename;
+      } catch {}
+    }
+  }
+  // folder / name 都不允许出现路径分隔符，杜绝目录穿越。
+  if (!folder || !name || /[\\/]/.test(folder) || /[\\/]/.test(name) || name.includes("..") || folder.includes("..")) {
+    sendText(res, 400, "Invalid history file ref");
+    return;
+  }
+  const resolved = path.resolve(historyRootDir, folder, name);
+  if (!resolved.startsWith(historyRootDir + path.sep)) {
+    sendText(res, 403, "Forbidden");
+    return;
+  }
+  if (!fs.existsSync(resolved) || fs.statSync(resolved).isDirectory()) {
+    sendText(res, 404, "History file not found");
+    return;
+  }
+
+  const ext = path.extname(resolved).toLowerCase();
+  const contentType = historyFileMime[ext] || "application/octet-stream";
+  const stat = fs.statSync(resolved);
+  const range = req.headers.range;
+  // 支持 Range，让 <video> 能拖动进度条/边下边播。
+  const rangeMatch = range && /^bytes=(\d*)-(\d*)$/.exec(range);
+  if (rangeMatch) {
+    let start = rangeMatch[1] ? parseInt(rangeMatch[1], 10) : 0;
+    let end = rangeMatch[2] ? parseInt(rangeMatch[2], 10) : stat.size - 1;
+    if (Number.isNaN(start) || Number.isNaN(end) || start > end || end >= stat.size) {
+      res.writeHead(416, { "Content-Range": `bytes */${stat.size}` });
+      res.end();
+      return;
+    }
+    res.writeHead(206, {
+      "Content-Type": contentType,
+      "Content-Range": `bytes ${start}-${end}/${stat.size}`,
+      "Accept-Ranges": "bytes",
+      "Content-Length": end - start + 1,
+      "Cache-Control": "private, max-age=86400",
+    });
+    fs.createReadStream(resolved, { start, end }).pipe(res);
+    return;
+  }
+  res.writeHead(200, {
+    "Content-Type": contentType,
+    "Accept-Ranges": "bytes",
+    "Content-Length": stat.size,
+    "Cache-Control": "private, max-age=86400",
+  });
+  fs.createReadStream(resolved).pipe(res);
+}
+
+const historyFileMime = {
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
+  ".mov": "video/quicktime",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+};
 
 function sizeToAspectRatio(size) {
   if (!size) return null;
@@ -1312,19 +1690,59 @@ async function chatImageGenerate(provider, model, refImages, body) {
   return { data: [{ url }] };
 }
 
-async function n1nFetchForm(provider, route, form) {
+function wrapUpstreamNetworkError(provider, error, timeoutMs) {
+  const code = String(error?.code || error?.cause?.code || "");
+  const label = provider?.label || provider?.id || "图片上游";
+  let message;
+  if (code === "UPSTREAM_TIMEOUT") {
+    message = `上游「${label}」等待超过 ${Math.round(timeoutMs / 60000)} 分钟，生成已中止`;
+  } else if (code === "ECONNREFUSED") {
+    message = `无法连接上游「${label}」（连接被拒绝）`;
+  } else if (code === "ENOTFOUND" || code === "EAI_AGAIN") {
+    message = `无法解析上游「${label}」的网络地址`;
+  } else {
+    message = `上游「${label}」网络连接失败${code ? `（${code}）` : ""}`;
+  }
+  const wrapped = new Error(message);
+  wrapped.statusCode = code === "UPSTREAM_TIMEOUT" ? 504 : 502;
+  wrapped.cause = error;
+  return wrapped;
+}
+
+async function n1nFetchForm(provider, route, form, options = {}) {
   ensureProvider(provider);
 
-  const response = await fetch(`${provider.baseUrl.replace(/\/$/, "")}${route}`, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${provider.apiKey}`,
-    },
-    body: form,
-  });
-
-  const text = await response.text();
+  let response;
+  let text;
+  if (options.timeoutMs) {
+    const encoded = new Response(form);
+    const body = Buffer.from(await encoded.arrayBuffer());
+    try {
+      response = await requestText(`${provider.baseUrl.replace(/\/$/, "")}${route}`, {
+        method: "POST",
+        timeoutMs: options.timeoutMs,
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${provider.apiKey}`,
+          "Content-Type": encoded.headers.get("content-type"),
+        },
+        body,
+      });
+      text = response.text;
+    } catch (error) {
+      throw wrapUpstreamNetworkError(provider, error, options.timeoutMs);
+    }
+  } else {
+    response = await fetch(`${provider.baseUrl.replace(/\/$/, "")}${route}`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${provider.apiKey}`,
+      },
+      body: form,
+    });
+    text = await response.text();
+  }
   let data;
   try {
     data = text ? JSON.parse(text) : null;
@@ -1344,17 +1762,34 @@ async function n1nFetchForm(provider, route, form) {
 async function n1nFetch(provider, route, options = {}) {
   ensureProvider(provider);
 
-  const response = await fetch(`${provider.baseUrl.replace(/\/$/, "")}${route}`, {
-    method: options.method || "GET",
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${provider.apiKey}`,
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-    },
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
-
-  const text = await response.text();
+  const requestBody = options.body ? JSON.stringify(options.body) : undefined;
+  const headers = {
+    Accept: "application/json",
+    Authorization: `Bearer ${provider.apiKey}`,
+    ...(options.body ? { "Content-Type": "application/json" } : {}),
+  };
+  let response;
+  let text;
+  if (options.timeoutMs) {
+    try {
+      response = await requestText(`${provider.baseUrl.replace(/\/$/, "")}${route}`, {
+        method: options.method || "GET",
+        headers,
+        body: requestBody,
+        timeoutMs: options.timeoutMs,
+      });
+      text = response.text;
+    } catch (error) {
+      throw wrapUpstreamNetworkError(provider, error, options.timeoutMs);
+    }
+  } else {
+    response = await fetch(`${provider.baseUrl.replace(/\/$/, "")}${route}`, {
+      method: options.method || "GET",
+      headers,
+      body: requestBody,
+    });
+    text = await response.text();
+  }
   let data;
   try {
     data = text ? JSON.parse(text) : null;

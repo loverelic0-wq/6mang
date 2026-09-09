@@ -623,6 +623,13 @@ const storageKey = "huobao-canvas-static:v1";
 const templateStorageKey = "huobao-canvas-templates:v1";
 const modelDefaultsStorageKey = "huobao-canvas-model-defaults:v1";
 const projectStorageKey = "huobao-canvas-projects:v1";
+const contextMenuFavoritesStorageKey = "huobao-canvas-context-menu-favorites:v1";
+const contextMenuModel = window.ContextMenuModel;
+const themeStyles = window.ThemeStyles;
+let contextMenuFavorites = [...contextMenuModel.defaultFavorites];
+try {
+  contextMenuFavorites = contextMenuModel.parseStoredFavorites(localStorage.getItem(contextMenuFavoritesStorageKey));
+} catch {}
 const imageAssetPrefix = "idb-image:";
 const transparentPixel = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 let imageAssetDbPromise = null;
@@ -652,6 +659,16 @@ function getProviderGroup(kind) {
   return backendConfig.providers?.[kind] || { default: "", items: {} };
 }
 
+function getProviderItem(kind, providerId = "") {
+  const group = getProviderGroup(kind);
+  const pid = providerId && group.items?.[providerId] ? providerId : group.default;
+  return group.items?.[pid] || null;
+}
+
+function isKlingProviderItem(item) {
+  return item?.adapter === "kling-cli";
+}
+
 function getDefaultProviderAndModel(kind) {
   const group = getProviderGroup(kind);
   const providerId = group.default && group.items[group.default] ? group.default : Object.keys(group.items)[0] || "";
@@ -668,13 +685,30 @@ function findProviderForModel(kind, modelId) {
 }
 
 function ensureNodeProvider(node) {
-  const kindMap = { llmConfig: "chat", promptOptimizer: "chat", imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", videoConfig: "video" };
+  const kindMap = { llmConfig: "chat", storyboardAssistant: "chat", promptOptimizer: "chat", imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", styleTransferConfig: "image", materialTransferConfig: "image", productBackgroundConfig: "image", faceSwapConfig: "image", seedreamEdit: "image", layerSeparation: "image", videoConfig: "video" };
   const kind = kindMap[node.type];
   if (!kind) return;
+  if (node.type === "seedreamEdit" || node.type === "layerSeparation") {
+    node.data.providerId = "volc";
+    node.data.model = "doubao-seedream-5-0-pro-260628";
+    return;
+  }
   const group = getProviderGroup(kind);
   if (!Object.keys(group.items).length) return;
   const existing = node.data.providerId && group.items[node.data.providerId] ? node.data.providerId : null;
-  if (existing) return;
+  if (kind === "image") {
+    const provider = existing
+      ? group.items[existing]
+      : (findProviderForModel(kind, node.data.model)?.item || group.items[group.default]);
+    node.data.model = window.GptImageModels.resolveModel(provider, node.data.model);
+  }
+  if (existing) {
+    const selected = group.items[existing];
+    if (!node.data.model || selected.models?.some((model) => model.id === node.data.model)) return;
+    const found = findProviderForModel(kind, node.data.model);
+    if (found) node.data.providerId = found.providerId;
+    return;
+  }
   if (node.data.model) {
     const found = findProviderForModel(kind, node.data.model);
     if (found) { node.data.providerId = found.providerId; return; }
@@ -724,8 +758,9 @@ const videoSecondsMin = 4;
 const videoSecondsMax = 15;
 // 火山 Seedance 支持的宽高比（adaptive = 跟随参考图）
 const videoAspectOptions = ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "adaptive"];
+const videoResolutionOptions = ["480p", "720p", "1080p"];
 // 输入模式：首尾帧 / 全能参考（智能多帧需视频输入做长视频拼接，暂未支持）
-const videoModeOptions = [["first_last", "首尾帧"], ["reference", "全能参考"]];
+const videoModeOptions = [["first_last", "首尾帧"], ["reference", "智能多参（全能参考）"]];
 
 // 取当前宽高比：node.data.ratio 优先；旧画布只有像素 size 时按比例吸附；默认 16:9
 function getVideoRatioValue(data) {
@@ -739,6 +774,16 @@ function getVideoRatioValue(data) {
 function getVideoMode(data) {
   const mode = String(data?.videoMode || "");
   return videoModeOptions.some(([k]) => k === mode) ? mode : "reference";
+}
+
+function getVideoResolutionValue(data) {
+  const resolution = String(data?.resolution || "").trim().toLowerCase();
+  if (videoResolutionOptions.includes(resolution)) return resolution;
+  const match = String(data?.size || "").match(/(\d+)\s*[x×]\s*(\d+)/);
+  const shortEdge = match ? Math.min(Number(match[1]), Number(match[2])) : 0;
+  if (shortEdge >= 1080) return "1080p";
+  if (shortEdge > 0 && shortEdge < 720) return "480p";
+  return "720p";
 }
 
 // 宽高比 → CSS aspect-ratio（adaptive 等无法解析的回退 16/9）
@@ -764,15 +809,23 @@ function getVideoSizeValue(model, size) {
 const nodeSizes = {
   text: { width: 260, height: 210 },
   llmConfig: { width: 300, height: 230 },
+  storyboardAssistant: { width: 360, height: 390 },
   promptOptimizer: { width: 320, height: 280 },
   imageConfig: { width: 300, height: 260 },
   image: { width: 260, height: 350 },
-  videoConfig: { width: 300, height: 250 },
+  videoConfig: { width: 300, height: 280 },
   video: { width: 300, height: 250 },
   storyboardConfig: { width: 360, height: 520 },
   templateImageConfig: { width: 320, height: 360 },
   imageCompare: { width: 320, height: 320 },
   imageExpand: { width: 320, height: 400 },
+  styleTransferConfig: { width: 320, height: 310 },
+  materialTransferConfig: { width: 330, height: 350 },
+  productBackgroundConfig: { width: 340, height: 380 },
+  faceSwapConfig: { width: 300, height: 250 },
+  seedreamEdit: { width: 330, height: 420 },
+  layerSeparation: { width: 320, height: 330 },
+  layerGroup: { width: 340, height: 430 },
   model3dPreview: { width: 280, height: 330 },
 };
 
@@ -818,7 +871,7 @@ function defaultState() {
         id: imageConfigId,
         type: "imageConfig",
         position: { x: 430, y: 110 },
-        data: { label: "文生图", model: getDefaultModel("image"), quality: "标准画质", size: "2048x2048", executed: true },
+        data: { label: "图片生成", model: getDefaultModel("image"), quality: "标准画质", size: "2048x2048", executed: true },
       },
       {
         id: imageId,
@@ -830,7 +883,7 @@ function defaultState() {
         id: videoConfigId,
         type: "videoConfig",
         position: { x: 430, y: 430 },
-        data: { label: "视频生成", model: getDefaultModel("video"), videoMode: "reference", ratio: "16:9", seconds: 8, executed: true },
+        data: { label: "视频生成", model: getDefaultModel("video"), videoMode: "reference", ratio: "16:9", resolution: "720p", seconds: 8, executed: true },
       },
       {
         id: videoId,
@@ -923,7 +976,7 @@ function normalizeModelValue(kind, value) {
   return String(value);
 }
 
-function modelOptionsForNode(kind, providerId, model) {
+function modelOptionsForNode(kind, providerId, model, activeTool = "") {
   const group = getProviderGroup(kind);
   const items = Object.entries(group.items);
   if (!items.length) {
@@ -932,19 +985,103 @@ function modelOptionsForNode(kind, providerId, model) {
   const selectedKey = makeModelKey(providerId || "", model || "");
   let foundMatch = false;
   const groups = items.map(([pid, item]) => {
-    const opts = (item.models || []).map((m) => {
+    const providerModels = activeTool && isKlingProviderItem(item) && window.KlingProvider
+      ? window.KlingProvider.modelsForTool(item, activeTool)
+      : (item.models || []);
+    const opts = providerModels.map((m) => {
       const key = makeModelKey(pid, m.id);
       const isSelected = key === selectedKey;
       if (isSelected) foundMatch = true;
       return `<option value="${escapeHtmlAttr(key)}"${isSelected ? " selected" : ""}>${escapeHtml(m.label || m.id)}</option>`;
     }).join("");
-    return `<optgroup label="${escapeHtmlAttr(item.label || pid)}">${opts}</optgroup>`;
+    const empty = !opts && isKlingProviderItem(item)
+      ? `<option value="" disabled>${item.authenticated ? "当前模式暂无可用模型" : "请先在设置中登录"}</option>`
+      : "";
+    return `<optgroup label="${escapeHtmlAttr(item.label || pid)}">${opts || empty}</optgroup>`;
   }).join("");
   if (model && !foundMatch) {
     const warn = `<option value="${escapeHtmlAttr(selectedKey)}" selected>⚠ 未配置: ${escapeHtml(model)}</option>`;
     return warn + groups;
   }
   return groups;
+}
+
+function klingToolForNode(node, kind) {
+  if (!window.KlingProvider || !node) return "";
+  const hasImages = getImageReferenceSlots(node.id).length > 0;
+  return window.KlingProvider.toolFor(kind, hasImages);
+}
+
+function klingStoredParams(node, model = node?.data?.model) {
+  return node?.data?.dynamicParams?.["kling-cli"]?.[model] || {};
+}
+
+function klingContextForNode(node, kind) {
+  const provider = getProviderItem(kind, node?.data?.providerId);
+  if (!isKlingProviderItem(provider) || !window.KlingProvider) return null;
+  const tool = klingToolForNode(node, kind);
+  const models = window.KlingProvider.modelsForTool(provider, tool);
+  const model = models.find((entry) => entry.id === node.data.model);
+  const spec = model?.specs?.[tool] || null;
+  return { provider, tool, models, model, spec };
+}
+
+function getKlingRequestParams(node, kind, connectedImages) {
+  const context = klingContextForNode(node, kind);
+  if (!context) return null;
+  if (!context.model || !context.spec) throw new Error(`当前模式 ${context.tool} 不支持模型 ${node.data.model || "（未选择）"}`);
+  window.KlingProvider.validateInputs(context.spec, connectedImages);
+  return window.KlingProvider.serializeParams(context.spec, klingStoredParams(node));
+}
+
+function renderKlingDynamicParams(node, kind) {
+  const context = klingContextForNode(node, kind);
+  if (!context) return "";
+  if (!context.model || !context.spec) {
+    return `<div class="kling-node-panel"><div class="storyboard-warn">当前输入模式没有匹配模型，请重新选择模型。</div></div>`;
+  }
+  const stored = klingStoredParams(node);
+  const fields = window.KlingProvider.fieldsForSpec(context.spec, stored);
+  const hasAspectRatio = fields.some((field) => field.name === "aspect_ratio");
+  const derivedVideoRatio = kind === "video" && !hasAspectRatio
+    ? `<div class="node-row kling-param-row"><span>比例</span><b>${getImageReferenceSlots(node.id).length ? "跟随首图" : "跟随实际视频"}</b></div>`
+    : "";
+  const fieldLabels = {
+    aspect_ratio: "比例",
+    duration: "时长",
+    resolution: "分辨率",
+    imageCount: "生成数量",
+    prefer_multi_shots: "多镜头",
+    enable_audio: "音频",
+  };
+  const inputNames = (context.spec.inputs || []).map((input) => `${input.name}${input.required ? "*" : ""}`).join(" · ");
+  const toolLabels = {
+    text_to_image: "文生图",
+    image_to_image: "参考图生图",
+    text_to_video: "文生视频",
+    image_to_video: "图生视频",
+  };
+  const rows = fields.map((field) => {
+    const title = field.description ? ` title="${escapeHtmlAttr(field.description)}"` : "";
+    let control;
+    if (field.options.length) {
+      control = `<select data-kling-param="${escapeHtmlAttr(field.name)}">${field.options.map((value) => {
+        const label = field.kind === "boolean" ? (value === "true" ? "开启" : "关闭") : value;
+        return `<option value="${escapeHtmlAttr(value)}"${value === field.value ? " selected" : ""}>${escapeHtml(label)}</option>`;
+      }).join("")}</select>`;
+    } else {
+      control = `<input type="text" data-kling-param="${escapeHtmlAttr(field.name)}" value="${escapeHtmlAttr(field.value)}" placeholder="${escapeHtmlAttr(field.defaultValue ? `默认 ${field.defaultValue}` : field.required ? "必填" : "可选")}">`;
+    }
+    return `<div class="node-row kling-param-row"${title}><span>${escapeHtml(fieldLabels[field.name] || field.name)}${field.required ? " *" : ""}</span>${control}</div>`;
+  }).join("");
+  return `
+    <div class="kling-node-panel">
+      <div class="kling-node-head"><span>可灵 CLI · ${escapeHtml(toolLabels[context.tool] || context.tool)}</span><small>动态参数</small></div>
+      ${derivedVideoRatio}
+      ${rows || '<div class="node-tip">此模型没有额外参数，使用服务端默认值。</div>'}
+      ${inputNames ? `<div class="node-tip">素材槽位：${escapeHtml(inputNames)}</div>` : ""}
+    </div>
+  `;
 }
 
 function escapeHtmlAttr(value) {
@@ -983,15 +1120,100 @@ const API_KEY_KEEP_SENTINEL_CLIENT = "__keep__";
 let settingsDraft = null;
 let settingsActiveKind = "chat";
 let settingsActiveProviderId = "";
+let klingUiState = { installed: false, authenticated: false, login: { status: "idle" }, account: null, loading: false, error: "" };
+let klingLoginPollTimer = null;
+
+function stopKlingLoginPolling() {
+  if (klingLoginPollTimer) clearInterval(klingLoginPollTimer);
+  klingLoginPollTimer = null;
+}
+
+async function refreshKlingUi({ refresh = false, includeAccount = true, rerender = true } = {}) {
+  klingUiState = { ...klingUiState, loading: true, error: "" };
+  if (rerender && settingsDraft) renderSettingsModal();
+  try {
+    const status = await apiFetch(`/api/kling/status${refresh ? "?refresh=1" : ""}`, { method: "GET" });
+    let account = klingUiState.account;
+    if (includeAccount && status.authenticated) account = await apiFetch("/api/kling/account", { method: "GET" });
+    if (!status.authenticated) account = null;
+    klingUiState = { ...status, account, loading: false, error: "" };
+  } catch (error) {
+    klingUiState = { ...klingUiState, loading: false, error: error.message };
+  }
+  if (rerender && settingsDraft) renderSettingsModal();
+  return klingUiState;
+}
+
+function syncManagedProvidersIntoDraft() {
+  if (!settingsDraft) return;
+  for (const kind of ["image", "video"]) {
+    const live = backendConfig.providers?.[kind]?.items?.["kling-cli"];
+    if (live && settingsDraft[kind]?.items) settingsDraft[kind].items["kling-cli"] = JSON.parse(JSON.stringify(live));
+  }
+}
+
+async function startKlingOAuth() {
+  try {
+    const login = await apiFetch("/api/kling/login", { method: "POST" });
+    klingUiState = { ...klingUiState, login, error: "" };
+    renderSettingsModal();
+    stopKlingLoginPolling();
+    klingLoginPollTimer = setInterval(async () => {
+      const status = await refreshKlingUi({ includeAccount: false, rerender: false });
+      if (status.login?.status === "waiting") {
+        renderSettingsModal();
+        return;
+      }
+      stopKlingLoginPolling();
+      await loadBackendStatus();
+      await refreshKlingUi({ includeAccount: true, rerender: false });
+      syncManagedProvidersIntoDraft();
+      renderSettingsModal();
+      showToast(status.login?.status === "succeeded" ? "可灵 OAuth 登录成功" : `可灵登录失败：${status.login?.error || status.authError || "未知错误"}`);
+    }, 1500);
+  } catch (error) {
+    showToast(`启动可灵登录失败：${error.message}`);
+  }
+}
+
+async function logoutKlingOAuth() {
+  try {
+    await apiFetch("/api/kling/logout", { method: "POST" });
+    stopKlingLoginPolling();
+    await loadBackendStatus();
+    await refreshKlingUi({ includeAccount: false, rerender: false });
+    syncManagedProvidersIntoDraft();
+    renderSettingsModal();
+    showToast("已退出可灵 CLI");
+  } catch (error) {
+    showToast(`退出可灵失败：${error.message}`);
+  }
+}
+
+async function forceRefreshKling() {
+  try {
+    const next = await apiFetch("/api/kling/refresh", { method: "POST" });
+    klingUiState = { ...next, account: next.account || null, loading: false, error: "" };
+    await loadBackendStatus();
+    syncManagedProvidersIntoDraft();
+    renderSettingsModal();
+    showToast("可灵模型与账户信息已刷新");
+  } catch (error) {
+    klingUiState = { ...klingUiState, loading: false, error: error.message };
+    renderSettingsModal();
+    showToast(`刷新可灵失败：${error.message}`);
+  }
+}
 
 async function openSettingsModal() {
   try {
     await loadBackendStatus();
+    await refreshKlingUi({ includeAccount: true, rerender: false });
     settingsDraft = JSON.parse(JSON.stringify(backendConfig.providers));
     for (const kind of ["chat", "image", "video"]) {
       const group = settingsDraft[kind] || { default: "", items: {} };
       for (const item of Object.values(group.items || {})) {
-        item.apiKey = API_KEY_KEEP_SENTINEL_CLIENT;
+        if (!item.managed) item.apiKey = API_KEY_KEEP_SENTINEL_CLIENT;
       }
     }
     settingsActiveKind = "chat";
@@ -1080,10 +1302,13 @@ function buildSettingsProviderList() {
       li.className = "settings-list-item" + (pid === settingsActiveProviderId ? " active" : "");
       li.dataset.settingsProvider = pid;
       const isDefault = group.default === pid;
+      const meta = item.managed || isKlingProviderItem(item)
+        ? (item.authenticated ? `${item.models?.length || 0} 个动态模型` : "OAuth 未连接")
+        : (item.defaultModel || "—");
       li.innerHTML = `
         <button type="button" class="settings-list-pick" data-settings-action="pick-provider" data-pid="${escapeHtmlAttr(pid)}">
           <span class="settings-list-name">${escapeHtml(item.label || pid)}${isDefault ? ' <span class="settings-default-tag">默认</span>' : ""}</span>
-          <span class="settings-list-meta">${escapeHtml(item.defaultModel || "—")}</span>
+          <span class="settings-list-meta">${escapeHtml(meta)}</span>
         </button>
       `;
       list.append(li);
@@ -1104,6 +1329,9 @@ function buildSettingsProviderEditor() {
   }
 
   const isDefault = group.default === settingsActiveProviderId;
+  if (item.managed || isKlingProviderItem(item)) {
+    return buildKlingSettingsEditor(wrap, item, isDefault);
+  }
   const keyEditing = item.apiKey !== API_KEY_KEEP_SENTINEL_CLIENT;
   const keyPlaceholder = keyEditing ? "" : "（保留现有 key，留空不变）";
 
@@ -1157,6 +1385,53 @@ function buildSettingsProviderEditor() {
   return wrap;
 }
 
+function buildKlingSettingsEditor(wrap, item, isDefault) {
+  const loginStatus = klingUiState.login?.status || "idle";
+  const waiting = loginStatus === "waiting";
+  const authenticated = Boolean(klingUiState.authenticated);
+  const account = klingUiState.account || {};
+  const membership = account.membershipTypeDescription || account.membershipType || "—";
+  const credits = account.availableRemainCredits ?? account.availableCredits ?? "—";
+  const stateLabel = !klingUiState.installed
+    ? "未安装 CLI"
+    : waiting ? "等待浏览器授权"
+      : authenticated ? "OAuth 已连接" : "尚未登录";
+  const error = klingUiState.error || klingUiState.authError || klingUiState.login?.error || "";
+  const models = Array.isArray(item.models) ? item.models : [];
+  wrap.classList.add("kling-settings-editor");
+  wrap.innerHTML = `
+    <div class="settings-editor-head">
+      <h3>可灵 CLI</h3>
+      <div class="settings-editor-actions">
+        ${isDefault ? '<span class="settings-default-tag">默认子类</span>' : '<button type="button" class="ghost-button" data-settings-action="set-default">设为默认</button>'}
+      </div>
+    </div>
+    <div class="kling-status-card ${authenticated ? "connected" : ""}">
+      <div class="kling-status-line"><span class="kling-status-dot"></span><strong>${escapeHtml(stateLabel)}</strong></div>
+      <div class="kling-status-meta">
+        <span>CLI ${escapeHtml(klingUiState.version || "—")}</span>
+        <span>${escapeHtml(settingsActiveKind === "image" ? "图片" : "视频")}模型 ${models.length}</span>
+        ${authenticated ? `<span>会员 ${escapeHtml(membership)}</span><span>灵感值 ${escapeHtml(credits)}</span>` : ""}
+      </div>
+      ${waiting ? '<div class="node-tip">授权页面已在系统浏览器打开，请完成登录；此处会自动更新。</div>' : ""}
+      ${error ? `<div class="kling-settings-error">${escapeHtml(error)}</div>` : ""}
+    </div>
+    <div class="kling-settings-actions">
+      <button type="button" class="send-button" data-settings-action="kling-login" ${waiting || klingUiState.loading ? "disabled" : ""}>${authenticated ? "重新登录" : "登录可灵"}</button>
+      ${authenticated ? '<button type="button" class="ghost-button" data-settings-action="kling-logout">退出登录</button>' : ""}
+      <button type="button" class="ghost-button" data-settings-action="kling-refresh" ${waiting || klingUiState.loading ? "disabled" : ""}>刷新能力</button>
+    </div>
+    <div class="settings-models">
+      <div class="settings-models-head"><span>动态模型（${models.length}）</span><small>来自 who_am_i</small></div>
+      <div class="kling-model-list">
+        ${models.map((model) => `<div><strong>${escapeHtml(model.label || model.id)}</strong><code>${escapeHtml(model.id)}</code><span>${escapeHtml((model.tools || []).join(" · "))}</span></div>`).join("") || '<div class="settings-models-empty">登录后自动读取当前账号可用模型。</div>'}
+      </div>
+    </div>
+    <div class="node-tip">OAuth 凭据只保存在本机 ~/.kling/.credentials；画布不会读取或保存 Token。可灵生成不使用画布积分。</div>
+  `;
+  return wrap;
+}
+
 function buildSettingsActions() {
   const actions = document.createElement("div");
   actions.className = "modal-actions";
@@ -1179,8 +1454,21 @@ settingsModal.addEventListener("click", async (event) => {
   const group = settingsDraft[settingsActiveKind];
 
   if (action === "cancel") {
+    stopKlingLoginPolling();
     settingsDraft = null;
     settingsModal.close();
+    return;
+  }
+  if (action === "kling-login") {
+    await startKlingOAuth();
+    return;
+  }
+  if (action === "kling-logout") {
+    await logoutKlingOAuth();
+    return;
+  }
+  if (action === "kling-refresh") {
+    await forceRefreshKling();
     return;
   }
   if (action === "pick-provider") {
@@ -1208,6 +1496,7 @@ settingsModal.addEventListener("click", async (event) => {
     return;
   }
   if (action === "delete-provider") {
+    if (group.items[settingsActiveProviderId]?.managed) return;
     if (!confirm(`确认删除子类「${group.items[settingsActiveProviderId]?.label || settingsActiveProviderId}」？`)) return;
     delete group.items[settingsActiveProviderId];
     const remaining = Object.keys(group.items);
@@ -1218,18 +1507,21 @@ settingsModal.addEventListener("click", async (event) => {
   }
   if (action === "toggle-key") {
     const item = group.items[settingsActiveProviderId];
+    if (item.managed) return;
     item.apiKey = item.apiKey === API_KEY_KEEP_SENTINEL_CLIENT ? "" : API_KEY_KEEP_SENTINEL_CLIENT;
     renderSettingsModal();
     return;
   }
   if (action === "add-model") {
     const item = group.items[settingsActiveProviderId];
+    if (item.managed) return;
     item.models.push({ id: "", label: "" });
     renderSettingsModal();
     return;
   }
   if (action === "delete-model") {
     const item = group.items[settingsActiveProviderId];
+    if (item.managed) return;
     const removed = item.models[idx]?.id;
     item.models.splice(idx, 1);
     if (item.defaultModel === removed) item.defaultModel = item.models[0]?.id || "";
@@ -1256,6 +1548,7 @@ settingsModal.addEventListener("input", (event) => {
   const t = event.target;
   const item = settingsDraft[settingsActiveKind]?.items?.[settingsActiveProviderId];
   if (!item) return;
+  if (item.managed || isKlingProviderItem(item)) return;
   const field = t.dataset.settingsField;
   if (field) {
     item[field] = t.value;
@@ -1278,6 +1571,7 @@ async function saveSettingsDraft() {
       const group = settingsDraft[kind];
       if (!group) continue;
       for (const [pid, item] of Object.entries(group.items)) {
+        if (item.managed || isKlingProviderItem(item)) continue;
         item.models = item.models.filter((m) => m.id && m.id.trim());
         item.models.forEach((m) => { m.id = m.id.trim(); m.label = (m.label || "").trim() || m.id; });
         if (item.defaultModel && !item.models.some((m) => m.id === item.defaultModel)) {
@@ -1296,6 +1590,7 @@ async function saveSettingsDraft() {
         video: response.providers.video || backendConfig.providers.video,
       };
     }
+    stopKlingLoginPolling();
     settingsDraft = null;
     settingsModal.close();
     render();
@@ -1307,8 +1602,8 @@ async function saveSettingsDraft() {
 
 // ===== 快速切换 API 平台 =====
 const NODE_KIND_MAP_CLIENT = {
-  llmConfig: "chat", promptOptimizer: "chat",
-  imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image",
+  llmConfig: "chat", storyboardAssistant: "chat", promptOptimizer: "chat",
+  imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", styleTransferConfig: "image", materialTransferConfig: "image", productBackgroundConfig: "image", faceSwapConfig: "image", seedreamEdit: "image", layerSeparation: "image",
   videoConfig: "video",
 };
 
@@ -1321,6 +1616,8 @@ function buildProvidersKeepPayload() {
     for (const [pid, it] of Object.entries(g.items || {})) {
       items[pid] = {
         label: it.label || "",
+        adapter: it.adapter || "http",
+        managed: Boolean(it.managed),
         baseUrl: it.baseUrl || "",
         apiKey: API_KEY_KEEP_SENTINEL_CLIENT,
         defaultModel: it.defaultModel || "",
@@ -1382,6 +1679,7 @@ async function switchKindProvider(kind, providerId) {
   let migrated = 0;
   state.nodes.forEach((node) => {
     if (NODE_KIND_MAP_CLIENT[node.type] !== kind) return;
+    if (node.type === "seedreamEdit" || node.type === "layerSeparation") return;
     node.data.providerId = providerId;
     // model 映射：新平台有同名 model 就保留，否则用新平台默认 model。
     if (node.data.model && !models.some((m) => m.id === node.data.model)) {
@@ -1588,7 +1886,7 @@ function sanitizeWorkflowState(workflow, options = {}) {
     edges,
     groups,
     view,
-    theme: source.theme === "dark" ? "dark" : "light",
+    theme: themeStyles.normalizeTheme(source.theme),
   };
 }
 
@@ -1658,7 +1956,7 @@ function getActiveProject() {
 
 async function recordProjectHistory(entry) {
   const project = getActiveProject();
-  if (!project) return;
+  if (!project) return null;
   const item = {
     id: makeId(),
     type: entry.type,
@@ -1674,6 +1972,7 @@ async function recordProjectHistory(entry) {
   saveProjectLibrary();
   if (!historyPanel.hidden) renderHistoryPanel();
 
+  let saveResult = null;
   try {
     const payload = {
       projectId: project.id,
@@ -1695,14 +1994,30 @@ async function recordProjectHistory(entry) {
     } else if (entry.type === "video" && /^https?:\/\//.test(entry.url)) {
       payload.remoteUrl = entry.url;
     }
-    await fetch("/api/history/save", {
+    const response = await fetch("/api/history/save", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    saveResult = await response.json().catch(() => null);
   } catch (error) {
     console.warn("history backend sync failed", error);
   }
+
+  // 视频上游链接是临时签名，刷新即失效；落盘成功后把历史记录的 url 换成持久的本地回流地址。
+  if (entry.type === "video" && saveResult?.ok && saveResult.fileUrl) {
+    item.url = saveResult.fileUrl;
+    saveProjectLibrary();
+    if (!historyPanel.hidden) renderHistoryPanel();
+    return { historyId: item.id, fileUrl: saveResult.fileUrl };
+  }
+  return { historyId: item.id, fileUrl: "" };
+}
+
+// 视频历史的持久播放地址：新记录已是本地回流地址直接用；旧记录只有过期上游链接，用 historyId 回查本地落盘文件。
+function historyVideoSrc(project, item) {
+  if (typeof item.url === "string" && item.url.startsWith("/api/history/file")) return item.url;
+  return `/api/history/file?projectId=${encodeURIComponent(project.id)}&projectName=${encodeURIComponent(project.name || "")}&historyId=${encodeURIComponent(item.id)}`;
 }
 
 function renderHistoryPanel() {
@@ -1716,7 +2031,7 @@ function renderHistoryPanel() {
     const time = new Date(item.createdAt).toLocaleString();
     const isVideo = item.type === "video";
     const media = isVideo
-      ? `<video src="${escapeHtml(item.url)}" muted preload="metadata"></video>`
+      ? `<video src="${escapeHtml(historyVideoSrc(project, item))}" muted preload="metadata" playsinline></video>`
       : `<img data-history-asset="${escapeHtml(item.url)}" alt="" loading="lazy">`;
     return `
       <div class="history-card" data-history-id="${escapeHtml(item.id)}">
@@ -1764,7 +2079,8 @@ async function addHistoryEntryToCanvas(itemId) {
   const size = nodeSizes[item.type === "video" ? "video" : "image"];
   const position = { x: center.x - size.width / 2, y: center.y - size.height / 2 };
   if (item.type === "video") {
-    addNode("video", position, { label: "历史视频", url: item.url, model: item.model });
+    // 用持久的本地回流地址，避免放进画布后又是过期上游链接。
+    addNode("video", position, { label: "历史视频", url: historyVideoSrc(project, item), model: item.model });
   } else {
     addNode("image", position, { label: "历史图片", url: item.url, model: item.model });
   }
@@ -1783,7 +2099,8 @@ historyListEl.addEventListener("click", (event) => {
     if (item.type === "image") {
       openImagePreview(item.url);
     } else {
-      window.open(item.url, "_blank", "noopener");
+      const project = getActiveProject();
+      window.open(project ? historyVideoSrc(project, item) : item.url, "_blank", "noopener");
     }
   } else if (action === "add-to-canvas") {
     void addHistoryEntryToCanvas(itemId);
@@ -2131,7 +2448,7 @@ function renderTemplateCard(template) {
 }
 
 function createTemplateCategory() {
-  const name = window.prompt("新建模板分组", "文生图工作流");
+  const name = window.prompt("新建模板分组", "图片生成工作流");
   if (name === null) return;
   const nextName = name.trim();
   if (!nextName) return;
@@ -2238,6 +2555,7 @@ function render() {
   renderEdges();
   hydrateAssetImages();
   setupExpandStages();
+  setupCompareStages();
   observeNodeResizesForGroups();
   zoomLabel.textContent = `${Math.round(state.view.zoom * 100)}%`;
 }
@@ -2483,9 +2801,12 @@ function getGroupAtPoint(point) {
 
 function getNodeSize(node) {
   const fallback = nodeSizes[node?.type] || { width: 260, height: 220 };
+  const stored = node?.type === "layerGroup"
+    ? window.SeedreamTools.layerGroupLayout(node.data, fallback)
+    : { nodeWidth: node?.data?.width, nodeHeight: node?.data?.height };
   return {
-    width: clamp(Number(node?.data?.width) || fallback.width, getMinNodeSize(node?.type).width, 900),
-    height: clamp(Number(node?.data?.height) || fallback.height, getMinNodeSize(node?.type).height, 900),
+    width: clamp(Number(stored.nodeWidth) || fallback.width, getMinNodeSize(node?.type).width, 900),
+    height: clamp(Number(stored.nodeHeight) || fallback.height, getMinNodeSize(node?.type).height, 900),
   };
 }
 
@@ -2592,6 +2913,24 @@ function renderNodeBody(node) {
     `;
   }
 
+  if (node.type === "storyboardAssistant") {
+    const inputs = incomingNodes(node.id, ["text", "llmConfig", "promptOptimizer"]).length;
+    const output = node.data.output || "连接故事/剧本/概念文本后，生成结构化分镜方案。";
+    return `
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("chat", node.data.providerId, node.data.model)}</select></div>
+      <div class="node-indicators">
+        <span class="indicator ${inputs ? "ready" : ""}">输入 ${inputs || "○"}</span>
+        <span class="indicator ${node.data.output ? "ready" : ""}">分镜 ${node.data.output ? "✓" : "○"}</span>
+      </div>
+      <div class="node-row node-row-col">
+        <span>补充要求</span>
+        <textarea data-field="requirements" spellcheck="false" placeholder="可空。例：广告片、悬疑情绪、需要 Midjourney 和视频提示词">${escapeHtml(node.data.requirements || "")}</textarea>
+      </div>
+      <div class="storyboard-assistant-output">${escapeHtml(output)}</div>
+      <button class="node-button" data-node-action="run-storyboard-assistant">生成分镜方案</button>
+    `;
+  }
+
   if (node.type === "promptOptimizer") {
     const f = node.data.fields || {};
     const inputs = incomingNodes(node.id, ["text"]).length;
@@ -2621,7 +2960,7 @@ function renderNodeBody(node) {
   }
 
   if (node.type === "imageConfig") {
-    const prompts = incomingNodes(node.id, ["text", "llmConfig", "promptOptimizer"]).length;
+    const prompts = incomingNodes(node.id, ["text", "llmConfig", "storyboardAssistant", "promptOptimizer"]).length;
     const refSlots = getImageReferenceSlots(node.id);
     const refIndicators = refSlots.length
       ? refSlots.map((ref) => `
@@ -2631,16 +2970,24 @@ function renderNodeBody(node) {
       `).join("")
       : `<span class="indicator">参考图 ○</span>`;
     const model = normalizeModelValue("image", node.data.model) || getDefaultModel("image");
-    const paramRows = isMjImageModel(model)
+    const klingTool = window.KlingProvider?.toolFor("image", refSlots.length > 0) || "";
+    const klingParamRows = renderKlingDynamicParams(node, "image");
+    const seedreamProRows = isSeedream5ProImageModel(model) ? `
+      <div class="node-row"><span>尺寸</span><select data-field="size">${optionPairs(imageSizeOptions(model), getImageSizeValue(model, node.data.size))}</select></div>
+      <div class="node-row"><span>格式</span><select data-field="outputFormat">${optionPairs([["png", "PNG · 透明/无损"], ["jpeg", "JPEG · 更小文件"]], node.data.outputFormat || "png")}</select></div>
+      <div class="node-row"><span>提示词优化</span><select data-field="promptOptimization">${optionPairs([["standard", "标准 · 质量优先"], ["fast", "快速 · 速度优先"]], node.data.promptOptimization || "standard")}</select></div>` : "";
+    const paramRows = klingParamRows || (isMjImageModel(model)
       ? `
       <div class="node-row"><span>比例</span><select data-field="mjAr">${options(mjAspectOptions, node.data.mjAr || "1:1")}</select></div>
       <div class="node-row"><span>版本</span><select data-field="mjVersion">${options(mjVersionsFor(model), getMjVersion(model, node.data.mjVersion))}</select></div>
       <div class="node-row"><span>速度</span><select data-field="mjSpeed">${options(mjSpeedOptions, node.data.mjSpeed || "fast")}</select></div>`
+      : seedreamProRows
+        ? seedreamProRows
       : `
-      <div class="node-row"><span>画质</span><select data-field="quality">${options(["标准画质", "高清画质", "4K"], node.data.quality)}</select></div>
-      <div class="node-row"><span>尺寸</span><select data-field="size">${optionPairs(imageSizeOptions(model), getImageSizeValue(model, node.data.size))}</select></div>`;
+      <div class="node-row"><span>画质</span><select data-field="quality">${options(imageQualityOptions(model), getImageQualityValue(model, node.data.quality))}</select></div>
+      ${renderImageSizeControl(model, node.data)}`);
     return `
-      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", node.data.providerId, node.data.model)}</select></div>
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", node.data.providerId, node.data.model, klingTool)}</select></div>
       ${paramRows}
       <div class="node-indicators">
         <span class="indicator ${prompts ? "ready" : ""}">提示词 ${prompts || "○"}</span>
@@ -2649,6 +2996,162 @@ function renderNodeBody(node) {
       <div class="node-split">
         <button class="node-button" data-node-action="generate-image">生成图片</button>
         <button class="node-secondary-button" data-node-action="replace-image">重新生成</button>
+      </div>
+    `;
+  }
+
+  if (node.type === "faceSwapConfig") {
+    const slots = getImageReferenceSlots(node.id);
+    const baseConnected = slots.length >= 1;
+    const faceConnected = slots.length >= 2;
+    const ready = baseConnected && faceConnected;
+    return `
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", node.data.providerId, node.data.model, "image_to_image")}</select></div>
+      <div class="node-row"><span>额外要求</span><input type="text" data-field="extra" placeholder="可留空。例：让表情更自然微笑" value="${escapeHtml(node.data.extra || "")}"></div>
+      <div class="node-indicators faceswap-slots">
+        <span class="indicator ${baseConnected ? "ready" : ""}">①底图 ${baseConnected ? "✓" : "○"}</span>
+        <span class="indicator ${faceConnected ? "ready" : ""}">②脸源 ${faceConnected ? "✓" : "○"}</span>
+      </div>
+      <div class="node-tip">第1张连入=底图（保留构图/光影），第2张=脸源（取这张的脸）</div>
+      <button class="node-button" data-node-action="generate-faceswap" ${ready ? "" : "disabled"}>换脸</button>
+    `;
+  }
+
+  if (node.type === "styleTransferConfig") {
+    const slots = getImageReferenceSlots(node.id);
+    const contentConnected = Boolean(slots[0]?.node?.data?.url);
+    const styleConnected = Boolean(slots[1]?.node?.data?.url);
+    const ready = slots.length === 2 && contentConnected && styleConnected;
+    const inputError = slots.length > 2 ? "只接受两张图片，请删除多余的参考图连线。" : "";
+    const strength = window.StyleTransfer.normalizeStrength(node.data.strength);
+    return `
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", node.data.providerId, node.data.model, "image_to_image")}</select></div>
+      <div class="node-row"><span>迁移强度</span><select data-field="strength">${optionPairs(window.StyleTransfer.strengthOptions, strength)}</select></div>
+      <div class="node-row"><span>额外要求</span><input type="text" data-field="extra" placeholder="可留空。例：背景保持纯白" value="${escapeHtml(node.data.extra || "")}"></div>
+      <div class="node-indicators style-transfer-slots">
+        <span class="indicator ${contentConnected ? "ready" : ""}">①内容图 ${contentConnected ? "✓" : "○"}</span>
+        <span class="indicator ${styleConnected ? "ready" : ""}">②风格参考 ${styleConnected ? "✓" : "○"}</span>
+      </div>
+      <div class="node-tip">第1张决定主体与构图，第2张只提供画风；输出比例自动跟随第1张。</div>
+      ${inputError ? `<div class="node-inline-error">${escapeHtml(inputError)}</div>` : ""}
+      <button class="node-button" data-node-action="generate-style-transfer" ${ready ? "" : "disabled"}>迁移风格</button>
+    `;
+  }
+
+  if (node.type === "materialTransferConfig") {
+    const slots = getImageReferenceSlots(node.id);
+    const structureConnected = Boolean(slots[0]?.node?.data?.url);
+    const materialConnected = Boolean(slots[1]?.node?.data?.url);
+    const ready = slots.length === 2 && structureConnected && materialConnected;
+    const inputError = slots.length > 2 ? "只接受两张图片，请删除多余的参考图连线。" : "";
+    const strength = window.MaterialTransfer.normalizeStrength(node.data.strength);
+    return `
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", node.data.providerId, node.data.model, "image_to_image")}</select></div>
+      <div class="node-row"><span>迁移强度</span><select data-field="strength">${optionPairs(window.MaterialTransfer.strengthOptions, strength)}</select></div>
+      <div class="node-row"><span>材质说明</span><input type="text" data-field="materialHint" placeholder="可留空自动识别。例：温润半透明白玉" value="${escapeHtml(node.data.materialHint || "")}"></div>
+      <div class="node-row"><span>额外要求</span><input type="text" data-field="extra" placeholder="可留空。例：只替换盔甲，皮肤不变" value="${escapeHtml(node.data.extra || "")}"></div>
+      <div class="node-indicators material-transfer-slots">
+        <span class="indicator ${structureConnected ? "ready" : ""}">①主体 / 结构 ${structureConnected ? "✓" : "○"}</span>
+        <span class="indicator ${materialConnected ? "ready" : ""}">②材质参考 ${materialConnected ? "✓" : "○"}</span>
+      </div>
+      <div class="node-tip">第1张锁定主体、视角和细节，第2张只提供材质；输出比例跟随第1张。</div>
+      ${inputError ? `<div class="node-inline-error">${escapeHtml(inputError)}</div>` : ""}
+      <button class="node-button" data-node-action="generate-material-transfer" ${ready ? "" : "disabled"}>迁移材质</button>
+    `;
+  }
+
+  if (node.type === "productBackgroundConfig") {
+    const slots = getImageReferenceSlots(node.id);
+    const { product, background, extras } = window.ProductBackground.assignInputs(slots);
+    let inputError = "";
+    let ready = false;
+    try { window.ProductBackground.validateInputs(slots); ready = true; } catch (error) { if (extras.length) inputError = error.message; }
+    const busy = activeProductBackgroundRuns.has(node.id);
+    const renderSlot = (slot, role, label) => {
+      const source = slot?.node?.data?.url;
+      const loaded = typeof source === "string" && source && !slot.node.data.loading;
+      return `<button class="product-background-slot ${loaded ? "ready" : ""}" data-node-action="upload-product-background-${role}" ${busy ? "disabled" : ""} title="上传或替换${label}">
+        ${loaded ? `<img src="${escapeHtml(imageDisplaySource(source))}" data-asset-url="${escapeHtml(source)}" alt="${label}">` : `<span class="product-background-slot-icon">＋</span>`}
+        <span>${label}${loaded ? " ✓" : " · 上传"}</span>
+      </button>`;
+    };
+    return `
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", node.data.providerId, node.data.model, "image_to_image")}</select></div>
+      <div class="product-background-slots">
+        ${renderSlot(product, "product", "①产品图")}
+        ${renderSlot(background, "background", "②背景图")}
+      </div>
+      <div class="node-row"><span>输出比例</span><select data-field="aspectSource">${optionPairs([["product", "跟随产品图"], ["background", "跟随背景图"]], window.ProductBackground.normalizeAspectSource(node.data.aspectSource))}</select></div>
+      <div class="node-row"><span>补充要求</span><input type="text" data-field="extra" placeholder="可留空。例：产品放在桌面中央" value="${escapeHtml(node.data.extra || "")}"></div>
+      <div class="node-tip">也可连入两张图片：①产品，②背景。一次编辑完成换背景与光影统一，尽量保留外观、文字和材质细节。</div>
+      ${inputError ? `<div class="node-inline-error">${escapeHtml(inputError)}</div>` : ""}
+      <button class="node-button" data-node-action="generate-product-background" ${ready && !busy ? "" : "disabled"}>${busy ? "正在换背景…" : "更换背景"}</button>
+    `;
+  }
+
+  if (node.type === "seedreamEdit") {
+    const slots = getImageReferenceSlots(node.id);
+    const hasBase = Boolean(slots[0]?.node?.data?.url);
+    const marks = Array.isArray(node.data.annotation?.marks) ? node.data.annotation.marks : [];
+    const model = normalizeModelValue("image", node.data.model) || "doubao-seedream-5-0-pro-260628";
+    return `
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", node.data.providerId, model, "image_to_image")}</select></div>
+      <div class="node-row"><span>尺寸</span><select data-field="size">${optionPairs(imageSizeOptions(model), getImageSizeValue(model, node.data.size))}</select></div>
+      <div class="node-row"><span>格式</span><select data-field="outputFormat">${optionPairs([["png", "PNG"], ["jpeg", "JPEG"]], node.data.outputFormat || "png")}</select></div>
+      <div class="node-row"><span>优化</span><select data-field="promptOptimization">${optionPairs([["standard", "标准"], ["fast", "快速"]], node.data.promptOptimization || "standard")}</select></div>
+      <div class="node-row node-row-col"><span>编辑要求</span><textarea data-field="prompt" placeholder="例：把框选区域的沙发改成墨绿色天鹅绒">${escapeHtml(node.data.prompt || "")}</textarea></div>
+      <div class="node-indicators">
+        <span class="indicator ${hasBase ? "ready" : ""}">待编辑原图 ${hasBase ? "✓" : "○"}</span>
+        <span class="indicator ${marks.length ? "ready" : ""}">空间标记 ${marks.length || "○"}</span>
+        ${slots.length > 1 ? `<span class="indicator ready">额外参考 ${slots.length - 1}</span>` : ""}
+      </div>
+      <div class="node-split">
+        <button class="node-secondary-button" data-node-action="open-seedream-editor" ${hasBase ? "" : "disabled"}>标记区域</button>
+        <button class="node-button" data-node-action="generate-seedream-edit" ${hasBase ? "" : "disabled"}>生成编辑结果</button>
+      </div>
+    `;
+  }
+
+  if (node.type === "layerSeparation") {
+    const slots = getImageReferenceSlots(node.id);
+    const ready = slots.length === 1 && Boolean(slots[0]?.node?.data?.url);
+    const hasPendingImport = Boolean(node.data.pendingLayerResponse);
+    return `
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", node.data.providerId, node.data.model, "image_to_image")}</select></div>
+      <div class="node-row"><span>分层尺寸</span><select data-field="size">${optionPairs([["auto", "自动"], ["1K", "1K"], ["1.5K", "1.5K"], ["2K", "2K"]], node.data.size || "auto")}</select></div>
+      <div class="node-row"><span>优化</span><select data-field="promptOptimization">${optionPairs([["standard", "标准"], ["fast", "快速"]], node.data.promptOptimization || "standard")}</select></div>
+      <div class="node-row"><span>随机种子</span><input type="number" min="0" max="2147483647" step="1" data-field="seed" value="${escapeHtml(node.data.seed ?? 0)}"></div>
+      <div class="node-row node-row-col"><span>拆分说明（可空）</span><textarea data-field="prompt" placeholder="自动识别主要元素；或指定：人物、标题、商品、装饰、背景">${escapeHtml(node.data.prompt || "")}</textarea></div>
+      <div class="node-indicators">
+        <span class="indicator ${ready ? "ready" : ""}">单张原图 ${ready ? "✓" : slots.length ? `${slots.length} 张` : "○"}</span>
+        <span class="indicator">透明 PNG · 最多 16 层</span>
+      </div>
+      ${node.data.error ? `<div class="node-inline-error">${escapeHtml(node.data.error)}</div>` : ""}
+      <button class="node-button" data-node-action="generate-layer-separation" ${ready ? "" : "disabled"}>${hasPendingImport ? "重试导入已生成图层" : "分离为可编辑图层"}</button>
+    `;
+  }
+
+  if (node.type === "layerGroup") {
+    const layers = Array.isArray(node.data.layers) ? [...node.data.layers].sort((a, b) => b.zIndex - a.zIndex) : [];
+    const layout = window.SeedreamTools.layerGroupLayout(node.data, nodeSizes.layerGroup);
+    const source = node.data.url || (node.data.compositeAssetId ? `${imageAssetPrefix}${node.data.compositeAssetId}` : "");
+    const displaySource = source ? imageDisplaySource(source) : "";
+    const preview = source
+      ? `<div class="image-preview has-image layer-group-preview" style="aspect-ratio:${layout.aspectRatio}"><img class="generated-image" src="${escapeHtml(displaySource)}" data-asset-url="${escapeHtml(source)}" alt="图层组合预览"></div>`
+      : `<div class="empty-media">等待图层数据</div>`;
+    const layerRows = layers.slice(0, 6).map((layer) => `
+      <div class="layer-group-row ${layer.visible === false ? "muted" : ""}">
+        <span>${layer.role === "background" ? "▣" : "◇"}</span>
+        <b>${escapeHtml(layer.name || "未命名图层")}</b>
+        <small>${Math.round((Number(layer.opacity) || 0) * 100)}%</small>
+      </div>`).join("");
+    return `
+      ${preview}
+      <div class="layer-group-summary"><span>${layers.length} 个图层</span><span>${layout.documentWidth}×${layout.documentHeight}</span></div>
+      <div class="layer-group-list">${layerRows || `<div class="layer-group-empty">暂无图层</div>`}${layers.length > 6 ? `<small>另有 ${layers.length - 6} 层…</small>` : ""}</div>
+      <div class="node-split">
+        <button class="node-secondary-button" data-node-action="layer-group-to-image" ${source ? "" : "disabled"}>合成为图片</button>
+        <button class="node-button" data-node-action="open-layer-editor" ${layers.length ? "" : "disabled"}>编辑图层</button>
       </div>
     `;
   }
@@ -2674,6 +3177,7 @@ function renderNodeBody(node) {
   }
 
   if (node.type === "model3dPreview") {
+    const director = Boolean(node.data.director);
     const hasModel = Boolean(node.data.modelAssetId);
     const hasShot = typeof node.data.url === "string" && node.data.url;
     const modeLabel = { material: "原始材质", clay: "素模", depth: "深度图", normal: "法线图", wireframe: "线框" }[node.data.renderMode] || "素模";
@@ -2682,16 +3186,18 @@ function renderNodeBody(node) {
            <img class="generated-image" src="${escapeHtml(imageDisplaySource(node.data.url) || transparentPixel)}" data-asset-url="${escapeHtml(node.data.url)}" alt="3D 取景" loading="lazy" referrerpolicy="no-referrer">
            <div class="image-load-error"><strong>预览加载失败</strong></div>
          </div>`
-      : `<div class="empty-media model3d-empty" data-node-action="${hasModel ? "model3d-open" : "model3d-upload"}">
+      : `<div class="empty-media model3d-empty" data-node-action="${hasModel || director ? "model3d-open" : "model3d-upload"}">
            <div>
-             <strong>${hasModel ? "点击「调整视角」取景" : "载入 3D 模型"}</strong>
-             <div class="image-drop-hint">glb · gltf · obj · fbx · stl</div>
+             <strong>${director ? "进入 3D 导演台" : hasModel ? "点击「调整视角」取景" : "载入 3D 模型"}</strong>
+             <div class="image-drop-hint">${director ? "布置场景 · 保存机位 · 运镜排练" : "glb · gltf · obj · fbx · stl"}</div>
            </div>
          </div>`;
     const meta = hasModel
       ? `<div class="node-row model3d-meta"><span>${escapeHtml(node.data.modelName || "模型")}</span><b>${escapeHtml(modeLabel)}</b></div>`
       : "";
-    const toolbar = hasModel
+    const toolbar = director
+      ? `<div class="node-row model3d-meta"><span>${node.data.directorData?.shots?.length || 0} 个机位</span><b>3D 导演台</b></div><div class="media-toolbar"><button data-node-action="model3d-open">打开导演台</button></div>`
+      : hasModel
       ? `<div class="media-toolbar">
            <button data-node-action="model3d-open">调整视角</button>
            <button data-node-action="model3d-upload">更换模型</button>
@@ -2703,7 +3209,7 @@ function renderNodeBody(node) {
   }
 
   if (node.type === "videoConfig") {
-    const prompt = incomingNodes(node.id, ["text", "llmConfig", "promptOptimizer"]).length;
+    const prompt = incomingNodes(node.id, ["text", "llmConfig", "storyboardAssistant", "promptOptimizer"]).length;
     const imageSlots = getImageReferenceSlots(node.id);
     const refSlots = getReferenceMaterialSlots(node.id);
     const mode = getVideoMode(node.data);
@@ -2711,6 +3217,7 @@ function renderNodeBody(node) {
       videoModeOptions.map(([k, l]) => `<option value="${k}" ${k === mode ? "selected" : ""}>${l}</option>`).join("")
     }<option value="multi_frame" disabled>智能多帧（即将支持）</option></select>`;
     const ratioValue = getVideoRatioValue(node.data);
+    const resolution = getVideoResolutionValue(node.data);
     const seconds = clamp(Number(node.data.seconds) || 8, videoSecondsMin, videoSecondsMax);
     const refIndicators = mode === "first_last"
       ? `
@@ -2725,12 +3232,17 @@ function renderNodeBody(node) {
     const modeTip = mode === "first_last"
       ? "图1=首帧，图2=尾帧，提示词描述中间过渡"
       : "提示词里用 @图片N / @视频N 指定每张素材的用途";
-    return `
-      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("video", node.data.providerId, node.data.model)}</select></div>
+    const klingTool = window.KlingProvider?.toolFor("video", imageSlots.length > 0) || "";
+    const klingParams = renderKlingDynamicParams(node, "video");
+    const legacyParams = `
       <div class="node-row"><span>模式</span>${modeSelect}</div>
       <div class="node-row"><span>比例</span><select data-field="ratio">${options(videoAspectOptions, ratioValue)}</select></div>
+      <div class="node-row"><span>分辨率</span><select data-field="resolution">${options(videoResolutionOptions, resolution)}</select></div>
       <div class="node-row"><span>时长</span><input type="range" class="node-range" data-field="seconds" min="${videoSecondsMin}" max="${videoSecondsMax}" step="1" value="${seconds}"><b data-range-label="seconds">${seconds}s</b></div>
-      <div class="node-tip">${modeTip}</div>
+      <div class="node-tip">${modeTip}</div>`;
+    return `
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("video", node.data.providerId, node.data.model, klingTool)}</select></div>
+      ${klingParams || legacyParams}
       <div class="node-indicators">
         <span class="indicator ${prompt ? "ready" : ""}">提示词 ${prompt ? "✓" : "○"}</span>
         ${refIndicators}
@@ -2787,8 +3299,8 @@ function renderNodeBody(node) {
       </details>
       <div class="storyboard-section">
         <div class="storyboard-section-title">下游</div>
-        <div class="node-row"><span>图模型</span><select data-field="model">${modelOptionsForNode("image", d.providerId, d.model)}</select></div>
-        <div class="node-row"><span>尺寸</span><select data-field="size">${optionPairs(imageSizeOptions(d.model), getImageSizeValue(d.model, d.size))}</select></div>
+        <div class="node-row"><span>图模型</span><select data-field="model">${modelOptionsForNode("image", d.providerId, d.model, "text_to_image")}</select></div>
+        ${renderImageSizeControl(d.model, d)}
       </div>
       <button class="node-button" data-node-action="generate-storyboard">生成故事板</button>
     `;
@@ -2812,8 +3324,8 @@ function renderNodeBody(node) {
       ? `<details class="storyboard-section" ${d._optOpen ? "open" : ""}><summary class="storyboard-section-title">更多选项（可选）</summary>${optFields.map((f) => renderTemplateField(f, d, hasRef)).join("")}</details>`
       : "";
     const refHint = hasRef
-      ? `<div class="storyboard-warn">已接参考图 → 以产品实物为准，配色/外观跟随真实产品</div>`
-      : `<span class="indicator">参考图 ○（接「载入图像」可放入真实产品图）</span>`;
+      ? `<div class="storyboard-warn">${escapeHtml(tpl.referenceActiveHint || "已接参考图 → 以产品实物为准，配色/外观跟随真实产品")}</div>`
+      : `<span class="indicator">${escapeHtml(tpl.referenceHint || "参考图 ○（接「载入图像」可放入真实产品图）")}</span>`;
     const model = normalizeModelValue("image", d.model) || getDefaultModel("image");
     return `
       <div class="storyboard-section">
@@ -2825,8 +3337,8 @@ function renderNodeBody(node) {
       ${optRows}
       <div class="node-indicators">${refHint}</div>
       <div class="storyboard-section">
-        <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", d.providerId, d.model)}</select></div>
-        <div class="node-row"><span>尺寸</span><select data-field="size">${optionPairs(imageSizeOptions(model), getImageSizeValue(model, d.size))}</select></div>
+        <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", d.providerId, d.model, hasRef ? "image_to_image" : "text_to_image")}</select></div>
+        ${renderImageSizeControl(model, d)}
       </div>
       <div class="node-split">
         <button class="node-button" data-node-action="generate-template-image">生成图片</button>
@@ -2854,8 +3366,12 @@ function renderNodeBody(node) {
     }
     const split = clamp(Number(node.data.split ?? 50), 0, 100);
     const imgTag = (src) => `<img class="generated-image compare-img" data-asset-url="${escapeHtml(src)}" src="${escapeHtml(imageDisplaySource(src) || transparentPixel)}" alt="" loading="lazy" referrerpolicy="no-referrer" draggable="false">`;
+    // 舞台比例跟随 A 图（第一张连入的图）的自然比例——已知时直接定死 aspect-ratio，
+    // 让横屏输入得到横屏对比框；未知时回落到 CSS 的方形 min-height，加载后由 setupCompareStages 补上。
+    const cw = Number(node.data._imgW) || 0, ch = Number(node.data._imgH) || 0;
+    const stageStyle = cw > 2 && ch > 2 ? ` style="aspect-ratio:${cw} / ${ch}; min-height:0"` : "";
     return `
-      <div class="compare-stage">
+      <div class="compare-stage"${stageStyle}>
         ${imgTag(bSrc)}
         <div class="compare-clip" style="clip-path: inset(0 ${100 - split}% 0 0)">
           ${imgTag(aSrc)}
@@ -2880,6 +3396,7 @@ function renderNodeBody(node) {
       `;
     }
     const d = node.data;
+    const expandTarget = expandTargetSize(node);
     return `
       <div class="expand-stage" data-expand-src="${escapeHtml(src)}">
         <div class="expand-frame">
@@ -2892,8 +3409,9 @@ function renderNodeBody(node) {
       </div>
       <div class="node-row"><span>锁原始比例</span><input type="checkbox" data-field="lockRatio" ${d.lockRatio ? "checked" : ""}></div>
       <div class="node-row"><span>填充提示</span><input type="text" data-field="prompt" placeholder="可留空。例：自然延展海边风景" value="${escapeHtml(d.prompt || "")}"></div>
-      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", d.providerId, d.model)}</select></div>
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", d.providerId, d.model, "image_to_image")}</select></div>
       <div class="node-row"><span>目标尺寸</span><span class="expand-size">${escapeHtml(computeExpandTargetLabel(node))}</span></div>
+      <div class="node-inline-error expand-size-error" ${expandTarget?.error ? "" : "hidden"}>${escapeHtml(expandTarget?.error || "")}</div>
       <button class="node-button" data-node-action="generate-expand">生成扩展</button>
     `;
   }
@@ -2922,6 +3440,16 @@ function renderNodeBody(node) {
         </div>`;
     } else if (node.data.url) {
       media = `<div class="video-preview" style="aspect-ratio:${aspect};--preview-bg:${node.data.gradient || ""}"></div>`;
+    } else if (node.data.taskId) {
+      const detail = node.data.error || "任务已经创建，可以继续查询生成状态";
+      media = `
+        <div class="empty-media error-media">
+          <div>
+            <strong>${node.data.error ? "查询暂时中断" : "任务待查询"}</strong>
+            <div class="image-drop-hint">${escapeHtml(detail)}</div>
+            <button class="node-secondary-button" data-node-action="resume-video-task">继续查询</button>
+          </div>
+        </div>`;
     } else {
       media = `
         <div class="empty-media image-drop-target" data-node-action="upload-video">
@@ -3060,6 +3588,66 @@ async function persistImageBlob(blob) {
   return `${imageAssetPrefix}${id}`;
 }
 
+async function probeImageDimensions(source) {
+  const display = await getDisplayImageUrl(source);
+  if (!display) return { width: 0, height: 0 };
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => resolve({ width: image.naturalWidth || 0, height: image.naturalHeight || 0 });
+    image.onerror = () => resolve({ width: 0, height: 0 });
+    image.src = display;
+  });
+}
+
+async function persistLayerImageSource(source) {
+  const existingId = getIndexedImageId(source);
+  if (existingId) {
+    const dimensions = await probeImageDimensions(source);
+    return { assetId: existingId, ...dimensions };
+  }
+  const response = await fetch(imageDisplaySource(source));
+  if (!response.ok) throw new Error(`图层下载失败（HTTP ${response.status}）`);
+  const blob = await response.blob();
+  if (!String(blob.type || "").startsWith("image/")) throw new Error("图层接口返回了非图片文件");
+  const sentinel = await persistImageBlob(blob);
+  const dimensions = await probeImageDimensions(sentinel);
+  return { assetId: getIndexedImageId(sentinel), ...dimensions };
+}
+
+async function persistCanvasDataUrl(dataUrl) {
+  const blob = await (await fetch(dataUrl)).blob();
+  return persistImageBlob(blob);
+}
+
+async function loadCanvasImage(source) {
+  const display = await getDisplayImageUrl(source);
+  if (!display) throw new Error("图层图片资源不可用");
+  const image = new Image();
+  image.src = display;
+  await new Promise((resolve, reject) => {
+    image.onload = resolve;
+    image.onerror = () => reject(new Error("图层图片加载失败"));
+  });
+  return image;
+}
+
+async function composeLayerGroupDataUrl(groupData) {
+  const width = Math.max(1, Math.round(Number(groupData?.width) || 1));
+  const height = Math.max(1, Math.round(Number(groupData?.height) || 1));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  const plan = window.SeedreamTools.layerRenderPlan(groupData?.layers);
+  for (const layer of plan) {
+    const image = await loadCanvasImage(`${imageAssetPrefix}${layer.assetId}`);
+    ctx.globalAlpha = layer.opacity;
+    ctx.drawImage(image, Number(layer.x) || 0, Number(layer.y) || 0, Number(layer.width) || image.naturalWidth, Number(layer.height) || image.naturalHeight);
+  }
+  ctx.globalAlpha = 1;
+  return canvas.toDataURL("image/png");
+}
+
 async function loadImageFileIntoNode(file, nodeId) {
   const node = getNode(nodeId);
   if (!node || node.type !== "image") return false;
@@ -3093,6 +3681,260 @@ async function createUploadedImageNode(file, position) {
   return id;
 }
 
+function drawSeedreamAnnotationMarks(ctx, marks, width, height) {
+  const color = "#8b5cf6";
+  const lineWidth = Math.max(4, Math.min(width, height) * 0.006);
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = lineWidth;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (const mark of Array.isArray(marks) ? marks : []) {
+    if (mark.type === "point") {
+      const x = mark.x * width;
+      const y = mark.y * height;
+      const radius = lineWidth * 2.2;
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x - radius * 1.5, y);
+      ctx.lineTo(x + radius * 1.5, y);
+      ctx.moveTo(x, y - radius * 1.5);
+      ctx.lineTo(x, y + radius * 1.5);
+      ctx.stroke();
+    } else if (mark.type === "box") {
+      const x = Math.min(mark.x1, mark.x2) * width;
+      const y = Math.min(mark.y1, mark.y2) * height;
+      ctx.strokeRect(x, y, Math.abs(mark.x2 - mark.x1) * width, Math.abs(mark.y2 - mark.y1) * height);
+    } else if (mark.type === "arrow") {
+      const x1 = mark.x1 * width;
+      const y1 = mark.y1 * height;
+      const x2 = mark.x2 * width;
+      const y2 = mark.y2 * height;
+      const angle = Math.atan2(y2 - y1, x2 - x1);
+      const head = lineWidth * 4;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.lineTo(x2 - Math.cos(angle - Math.PI / 6) * head, y2 - Math.sin(angle - Math.PI / 6) * head);
+      ctx.moveTo(x2, y2);
+      ctx.lineTo(x2 - Math.cos(angle + Math.PI / 6) * head, y2 - Math.sin(angle + Math.PI / 6) * head);
+      ctx.stroke();
+    } else if (mark.type === "brush" && Array.isArray(mark.points) && mark.points.length) {
+      ctx.beginPath();
+      ctx.moveTo(mark.points[0].x * width, mark.points[0].y * height);
+      for (const point of mark.points.slice(1)) ctx.lineTo(point.x * width, point.y * height);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+async function renderAnnotatedImage(source, annotation) {
+  const displaySource = await getDisplayImageUrl(source);
+  if (!displaySource) throw new Error("待编辑原图不可用");
+  const image = new Image();
+  image.crossOrigin = "anonymous";
+  image.src = displaySource;
+  await new Promise((resolve, reject) => {
+    image.onload = resolve;
+    image.onerror = () => reject(new Error("待编辑原图加载失败"));
+  });
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(image, 0, 0);
+  drawSeedreamAnnotationMarks(ctx, annotation?.marks, canvas.width, canvas.height);
+  return canvas.toDataURL("image/png");
+}
+
+let activeSeedreamAnnotationEditor = null;
+
+async function openSeedreamAnnotationEditor(nodeId) {
+  const node = getNode(nodeId);
+  const baseNode = getImageReferenceSlots(nodeId)[0]?.node;
+  if (!node || node.type !== "seedreamEdit" || !baseNode?.data?.url) {
+    showToast("先连接一张待编辑原图");
+    return;
+  }
+  activeSeedreamAnnotationEditor?.();
+  const displaySource = await getDisplayImageUrl(baseNode.data.url);
+  const image = new Image();
+  image.crossOrigin = "anonymous";
+  image.src = displaySource;
+  try {
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = () => reject(new Error("待编辑原图加载失败"));
+    });
+  } catch (error) {
+    showToast(error.message);
+    return;
+  }
+
+  const overlay = document.createElement("div");
+  overlay.className = "seedream-editor-overlay";
+  overlay.innerHTML = `
+    <div class="seedream-editor-dialog">
+      <header class="seedream-editor-head">
+        <div><strong>Seedream 精确编辑</strong><small>紫色标记只用于告诉模型修改位置</small></div>
+        <button type="button" data-seedream-editor-action="close" aria-label="关闭">×</button>
+      </header>
+      <div class="seedream-editor-body">
+        <aside class="seedream-editor-tools" aria-label="标注工具">
+          <button type="button" class="active" data-seedream-tool="point">点</button>
+          <button type="button" data-seedream-tool="box">框</button>
+          <button type="button" data-seedream-tool="arrow">箭头</button>
+          <button type="button" data-seedream-tool="brush">画笔</button>
+          <button type="button" data-seedream-tool="eraser">橡皮</button>
+          <span></span>
+          <button type="button" data-seedream-editor-action="undo">撤销</button>
+          <button type="button" data-seedream-editor-action="clear">清空</button>
+        </aside>
+        <div class="seedream-editor-stage"><canvas></canvas></div>
+      </div>
+      <footer class="seedream-editor-foot">
+        <span data-seedream-mark-count></span>
+        <span class="seedream-editor-tip">点/框/箭头适合精确定位，画笔适合不规则区域</span>
+        <button type="button" class="node-secondary-button" data-seedream-editor-action="close">取消</button>
+        <button type="button" class="node-button" data-seedream-editor-action="apply">应用标注</button>
+      </footer>
+    </div>`;
+  document.body.append(overlay);
+
+  const canvas = overlay.querySelector("canvas");
+  const ctx = canvas.getContext("2d");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  let tool = "point";
+  let pointerId = null;
+  let activeMark = null;
+  let draft = JSON.parse(JSON.stringify(node.data.annotation || { version: 1, marks: [] }));
+  draft.version = 1;
+  draft.width = image.naturalWidth;
+  draft.height = image.naturalHeight;
+  draft.marks = Array.isArray(draft.marks) ? draft.marks : [];
+  const undoStack = [];
+
+  const cloneMarks = () => JSON.parse(JSON.stringify(draft.marks));
+  const remember = () => {
+    undoStack.push(cloneMarks());
+    if (undoStack.length > 30) undoStack.shift();
+  };
+  const draw = () => {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(image, 0, 0);
+    drawSeedreamAnnotationMarks(ctx, draft.marks, canvas.width, canvas.height);
+    overlay.querySelector("[data-seedream-mark-count]").textContent = `已标记 ${draft.marks.length} 处`;
+  };
+  const pointFromEvent = (event) => {
+    const rect = canvas.getBoundingClientRect();
+    return window.SeedreamTools.clampNormalizedPoint({
+      x: (event.clientX - rect.left) / rect.width,
+      y: (event.clientY - rect.top) / rect.height,
+    });
+  };
+  const cleanup = () => {
+    document.removeEventListener("keydown", onKeydown);
+    overlay.remove();
+    if (activeSeedreamAnnotationEditor === cleanup) activeSeedreamAnnotationEditor = null;
+  };
+  const onKeydown = (event) => {
+    if (event.key === "Escape") cleanup();
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+      event.preventDefault();
+      if (undoStack.length) {
+        draft.marks = undoStack.pop();
+        draw();
+      }
+    }
+  };
+  activeSeedreamAnnotationEditor = cleanup;
+  document.addEventListener("keydown", onKeydown);
+
+  overlay.addEventListener("click", (event) => {
+    const toolButton = event.target.closest("[data-seedream-tool]");
+    if (toolButton) {
+      tool = toolButton.dataset.seedreamTool;
+      overlay.querySelectorAll("[data-seedream-tool]").forEach((button) => button.classList.toggle("active", button === toolButton));
+      return;
+    }
+    const action = event.target.closest("[data-seedream-editor-action]")?.dataset.seedreamEditorAction;
+    if (action === "close") cleanup();
+    if (action === "undo" && undoStack.length) {
+      draft.marks = undoStack.pop();
+      draw();
+    }
+    if (action === "clear" && draft.marks.length) {
+      remember();
+      draft.marks = [];
+      draw();
+    }
+    if (action === "apply") {
+      commitHistory();
+      updateNode(nodeId, { annotation: draft });
+      cleanup();
+      showToast(`已保存 ${draft.marks.length} 处空间标记`);
+    }
+  });
+
+  canvas.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    const point = pointFromEvent(event);
+    if (tool === "eraser") {
+      const rect = canvas.getBoundingClientRect();
+      const tolerance = 14 / Math.max(1, Math.min(rect.width, rect.height));
+      const index = window.SeedreamTools.findAnnotationMarkAt(draft.marks, point, tolerance);
+      if (index >= 0) {
+        remember();
+        draft.marks.splice(index, 1);
+        draw();
+      }
+      return;
+    }
+    remember();
+    pointerId = event.pointerId;
+    canvas.setPointerCapture(pointerId);
+    if (tool === "point") {
+      draft.marks.push({ type: "point", ...point });
+      pointerId = null;
+    } else if (tool === "box" || tool === "arrow") {
+      activeMark = { type: tool, x1: point.x, y1: point.y, x2: point.x, y2: point.y };
+      draft.marks.push(activeMark);
+    } else if (tool === "brush") {
+      activeMark = { type: "brush", points: [point] };
+      draft.marks.push(activeMark);
+    }
+    draw();
+  });
+
+  canvas.addEventListener("pointermove", (event) => {
+    if (pointerId !== event.pointerId || !activeMark) return;
+    const point = pointFromEvent(event);
+    if (activeMark.type === "box" || activeMark.type === "arrow") {
+      activeMark.x2 = point.x;
+      activeMark.y2 = point.y;
+    } else if (activeMark.type === "brush") {
+      activeMark.points.push(point);
+    }
+    draw();
+  });
+
+  const finishPointer = (event) => {
+    if (pointerId !== event.pointerId) return;
+    if (activeMark?.type === "brush") activeMark.points = window.SeedreamTools.simplifyNormalizedPath(activeMark.points);
+    pointerId = null;
+    activeMark = null;
+    draw();
+  };
+  canvas.addEventListener("pointerup", finishPointer);
+  canvas.addEventListener("pointercancel", finishPointer);
+  draw();
+}
+
 function pickImageFile(fileList) {
   return Array.from(fileList || []).find((file) => String(file.type || "").startsWith("image/"));
 }
@@ -3112,12 +3954,7 @@ async function persistVideoBlob(blob) {
 }
 
 function ratioFromDimensions(width, height) {
-  const w = Math.round(width);
-  const h = Math.round(height);
-  if (!(w > 0) || !(h > 0)) return "";
-  const gcd = (a, b) => (b ? gcd(b, a % b) : a);
-  const g = gcd(w, h);
-  return `${w / g}:${h / g}`;
+  return window.KlingProvider?.videoMetadataRatio({ source: "metadata", width, height, currentRatio: "" }) || "";
 }
 
 function probeVideoRatio(src) {
@@ -3169,6 +4006,15 @@ async function createUploadedVideoNode(file, position) {
 // ============ 3D 模型预览节点 ============
 const model3dFormats = ["glb", "gltf", "obj", "fbx", "stl"];
 
+function addDirector3dNode(position) {
+  const id = addNode("model3dPreview", position || getViewportCenter(), {
+    label: "3D 导演台", director: true, renderMode: "material", view: window.Director3D.initialView(), directorData: window.Director3D.normalize(),
+  });
+  nodeMenu.hidden = true;
+  openModel3dEditor(id);
+  return id;
+}
+
 function detectModelFormat(filename) {
   const ext = String(filename || "").split(".").pop().toLowerCase();
   return model3dFormats.includes(ext) ? ext : "";
@@ -3201,9 +4047,10 @@ function triggerModelUpload(nodeId) {
     }
     try {
       const assetId = await persistModelBlob(file, file.name);
+      if (activeModel3dEditor?.nodeId === nodeId) activeModel3dEditor.close();
       commitHistory();
       // 换模型时清掉旧截图与视角，避免对不上。
-      updateNode(nodeId, { modelAssetId: assetId, modelName: file.name, modelFormat: format, url: false, view: null });
+      updateNode(nodeId, { modelAssetId: assetId, modelName: file.name, modelFormat: format, url: false, view: getNode(nodeId)?.data.director ? getNode(nodeId).data.view : null });
       showToast("已载入模型，点击「调整视角」取景");
       openModel3dEditor(nodeId);
     } catch (error) {
@@ -3218,7 +4065,8 @@ let activeModel3dEditor = null;
 async function openModel3dEditor(nodeId) {
   const node = getNode(nodeId);
   if (!node || node.type !== "model3dPreview") return;
-  if (!node.data.modelAssetId) {
+  const isDirector = Boolean(node.data.director);
+  if (!node.data.modelAssetId && !isDirector) {
     triggerModelUpload(nodeId);
     return;
   }
@@ -3249,11 +4097,14 @@ async function openModel3dEditor(nodeId) {
   const initialAoRadius = typeof savedView.aoRadius === "number" ? savedView.aoRadius : 0.5;
 
   const overlay = document.createElement("div");
-  overlay.className = "model3d-overlay";
+  overlay.className = `model3d-overlay${isDirector ? " director3d-overlay" : ""}`;
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-label", isDirector ? "3D 导演台" : "3D 取景");
   overlay.innerHTML = `
     <div class="model3d-dialog">
       <header class="model3d-head">
-        <span class="model3d-title">3D 取景 · ${escapeHtml(node.data.modelName || "模型")}</span>
+        <span class="model3d-title">${isDirector ? "3D 导演台" : "3D 取景"} · ${escapeHtml(node.data.modelName || (isDirector ? "场景排练" : "模型"))}</span>
         <span class="model3d-head-actions">
           <button class="model3d-close" data-m3d="fullscreen" title="全屏 / 还原">⛶</button>
           <button class="model3d-close" data-m3d="cancel" title="关闭">✕</button>
@@ -3262,7 +4113,7 @@ async function openModel3dEditor(nodeId) {
       <div class="model3d-body">
         <div class="model3d-stage" data-m3d="stage">
         <div class="model3d-mask" data-m3d="mask"><div class="model3d-mask-window" data-m3d="maskwin"></div></div>
-        <div class="model3d-loading" data-m3d="loading">加载模型中…</div>
+        <div class="model3d-loading" data-m3d="loading">正在准备场景…</div>
         <div class="model3d-tools" data-m3d="tools">
           <span class="m3d-tools-title">添加</span>
           <button data-m3d="add" data-kind="box" title="立方体">▢</button>
@@ -3325,8 +4176,8 @@ async function openModel3dEditor(nodeId) {
         <button class="node-secondary-button" data-m3d="reset" title="回到标准机位">重置视角</button>
         <span class="model3d-hint" data-m3d="hint">左键旋转 · 右键/方向键平移 · 滚轮缩放</span>
         <div class="model3d-actions">
-          <button class="node-secondary-button" data-m3d="cancel">取消</button>
-          <button class="node-button" data-m3d="capture">截取并应用</button>
+          <button class="node-secondary-button" data-m3d="cancel">保存并关闭</button>
+          <button class="node-button" data-m3d="capture">${isDirector ? "输出当前参考帧" : "截取并应用"}</button>
         </div>
       </footer>
     </div>
@@ -3368,7 +4219,7 @@ async function openModel3dEditor(nodeId) {
   // 对象列表（Outliner）：列出场景对象，点选高亮。
   const objIcon = { model: "◈", primitive: "▢", light: "☀" };
   const lightTypeLabel = { directional: "平行光", point: "点光", spot: "聚光" };
-  const primTypeLabel = { box: "立方体", sphere: "球体", cone: "圆锥", cylinder: "圆柱", plane: "平面", torus: "圆环" };
+  const primTypeLabel = { box: "立方体", sphere: "球体", cone: "圆锥", cylinder: "圆柱", plane: "平面", torus: "圆环", actor: "站姿角色", seatedActor: "坐姿角色" };
   function buildOutliner() {
     if (!controller) { outliner.innerHTML = ""; return; }
     const objs = controller.getObjects();
@@ -3444,10 +4295,64 @@ async function openModel3dEditor(nodeId) {
   function refreshPanel() {
     buildOutliner();
     buildProps(controller ? controller.getSelectionInfo() : null);
+    if (isDirector && controller?.hasSelection()) {
+      const transform = controller.getSelectedTransform();
+      const panel = document.createElement("div");
+      panel.className = "director-transform";
+      panel.innerHTML = `<label>名称 <input aria-label="对象名称" data-transform-name value="${escapeHtml(transform.name || "")}" maxlength="80"></label>${[["position", "位置"], ["rotation", "旋转°"], ["scale", "缩放"]].map(([key, label]) => `<div><span>${label}</span>${transform[key].map((v, i) => `<input aria-label="${label}${["X", "Y", "Z"][i]}" type="number" step="${key === "rotation" ? 5 : 0.1}" value="${Number(v.toFixed(2))}" data-transform="${key}" data-axis="${i}">`).join("")}</div>`).join("")}`;
+      panel.querySelector("[data-transform-name]").addEventListener("input", (event) => {
+        controller.renameSelected(event.target.value, false); buildOutliner(); scheduleSceneSave();
+      });
+      panel.querySelectorAll("[data-transform]").forEach((input) => input.addEventListener("input", () => {
+        if (input.value === "" || !input.validity.valid) return;
+        controller.setSelectedTransform(input.dataset.transform, Number(input.dataset.axis), Number(input.value)); scheduleSceneSave();
+      }));
+      props.prepend(panel);
+    }
   }
 
   let controller = null;
+  let directorUI = null;
   let loaded = false;
+  let closed = false;
+  let captureBusy = false;
+  let sceneSaveTimer = null;
+  const focusBeforeOpen = document.activeElement;
+  const saveScene = (directorData = directorUI?.getData()) => {
+    if (!controller || !loaded || closed) return;
+    const st = controller.getState();
+    Object.assign(st, { aspect: selectedRatio, maskAlpha, showGrid });
+    updateNode(nodeId, { view: st, renderMode: st.renderMode, ...(directorData ? { directorData } : {}) });
+  };
+  const scheduleSceneSave = () => {
+    if (!isDirector || closed) return;
+    clearTimeout(sceneSaveTimer);
+    sceneSaveTimer = setTimeout(() => saveScene(), 250);
+  };
+  const onPageHide = () => saveScene();
+  const syncCamera = () => {
+    fovInput.value = Math.round(controller.getFov()); updateFovLabel(); updateMask();
+    const inShot = controller.getViewMode() === "shot";
+    overlay.querySelector('[data-m3d="viewmode"]').textContent = inShot ? "视角：摄像机" : "视角：自由";
+    overlay.querySelector('[data-m3d="viewmode"]').classList.toggle("free", !inShot);
+  };
+  const exportDirectorFrames = async (frames, motion = null) => {
+    const projectId = projectLibrary.activeProjectId;
+    const sources = await Promise.all(frames.map(async (frame) => persistImageBlob(await (await fetch(frame.url)).blob())));
+    if (projectLibrary.activeProjectId !== projectId || !getNode(nodeId)) throw new Error("项目已切换，请回到原项目重新输出");
+    commitHistory();
+    const source = getNode(nodeId);
+    const startX = source.position.x + 370;
+    const startY = source.position.y + state.nodes.filter((n) => n.data.directorSource === nodeId).length * 45;
+    frames.forEach((frame, index) => {
+      const outputId = addNode("image", { x: startX + index * 335, y: startY }, {
+        label: frame.label, url: sources[index], directorSource: nodeId, directorCamera: frame.camera, directorMotion: motion,
+      });
+      addEdge(nodeId, outputId, "output", { label: frame.label });
+    });
+    updateNode(nodeId, { url: sources[0] });
+    saveScene();
+  };
   const onResize = () => { if (controller) controller.resize(); updateMask(); };
   const syncGizmoButtons = () => {
     const m = controller?.getGizmoMode?.() || "translate";
@@ -3455,24 +4360,31 @@ async function openModel3dEditor(nodeId) {
   };
 
   const cleanup = () => {
+    if (closed) return;
+    clearTimeout(sceneSaveTimer);
+    directorUI?.stop();
+    saveScene();
+    closed = true;
     window.removeEventListener("resize", onResize);
     document.removeEventListener("keydown", onKey);
+    window.removeEventListener("pagehide", onPageHide);
     // 关闭即保存场景（零件 + 视角），无论取消还是截取——摆场景和出图是两件事。
-    if (controller && loaded) {
-      try {
-        const st = controller.getState();
-        st.aspect = selectedRatio;
-        st.maskAlpha = maskAlpha;
-        st.showGrid = showGrid;
-        updateNode(nodeId, { view: st, renderMode: st.renderMode });
-      } catch (_) {}
+    directorUI?.dispose();
+    if (controller) {
       try { controller.dispose(); } catch (_) {}
     }
     controller = null;
     overlay.remove();
     activeModel3dEditor = null;
+    if (focusBeforeOpen?.isConnected) focusBeforeOpen.focus();
   };
   const onKey = (e) => {
+    if (e.key === "Tab") {
+      const items = [...overlay.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), canvas')].filter((el) => el.getClientRects().length);
+      const first = items[0]; const last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+    }
     const tag = e.target.tagName;
     if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") {
       if (e.key === "Escape") cleanup();
@@ -3591,9 +4503,16 @@ async function openModel3dEditor(nodeId) {
       return;
     }
     if (act === "capture") {
-      if (!controller) return;
+      if (!controller || !loaded || captureBusy) return;
+      captureBusy = true;
+      directorUI?.stop();
       try {
         const dataUrl = controller.capture("image/png", ratioNumOf(selectedRatio));
+        if (isDirector) {
+          await exportDirectorFrames([{ label: "导演台参考帧", url: dataUrl, camera: controller.getShot() }]);
+          showToast("参考帧已输出到画布");
+          return;
+        }
         // 始终写 IndexedDB（不走 persistImageSource 的 120KB 阈值），避免 base64 进 localStorage 撑爆配额。
         const blob = await (await fetch(dataUrl)).blob();
         const sentinel = await persistImageBlob(blob);
@@ -3603,25 +4522,32 @@ async function openModel3dEditor(nodeId) {
         st.maskAlpha = maskAlpha;
         st.showGrid = showGrid;
         updateNode(nodeId, { url: sentinel, view: st, renderMode: st.renderMode });
-        showToast("已截取当前比例画面，可连线到文生图节点作参考");
+        showToast("已截取当前比例画面，可连线到图片生成节点作参考");
         cleanup();
       } catch (error) {
         showToast(`截取失败：${error.message}`);
+      } finally {
+        captureBusy = false;
       }
     }
   });
   // 浮层背景点击关闭
-  overlay.addEventListener("pointerdown", (e) => { if (e.target === overlay) cleanup(); });
+  overlay.addEventListener("pointerdown", (e) => {
+    if (e.target === overlay) cleanup();
+    else if (!e.target.closest(".director-timeline")) directorUI?.stop();
+  });
+  overlay.addEventListener("change", scheduleSceneSave);
+  overlay.addEventListener("click", scheduleSceneSave);
 
   try {
-    controller = window.Model3D.mount(stage, { renderMode: initialMode, onSelectionChange: refreshPanel });
+    controller = window.Model3D.mount(stage, { renderMode: initialMode, director: isDirector, onSelectionChange: refreshPanel, onChange: scheduleSceneSave });
     fovInput.addEventListener("input", () => { controller.setFov(fovInput.value); updateFovLabel(); });
     modeSelect.addEventListener("change", () => controller.setRenderMode(modeSelect.value));
     ratioSelect.addEventListener("change", () => {
       selectedRatio = ratioSelect.value;
       updateMask();
       const n = applyAspectToImageConfigs(nodeId, ratioNumOf(selectedRatio));
-      if (n) showToast(`已把比例 ${selectedRatio} 同步到 ${n} 个文生图节点`);
+      if (n) showToast(`已把比例 ${selectedRatio} 同步到 ${n} 个图片生成节点`);
     });
     const maskAlphaInput = overlay.querySelector('[data-m3d="maskalpha"]');
     maskAlphaInput.addEventListener("input", () => { maskAlpha = Number(maskAlphaInput.value) / 100; updateMask(); });
@@ -3633,10 +4559,15 @@ async function openModel3dEditor(nodeId) {
     aoRadInput.addEventListener("input", () => controller.setAORadius(Number(aoRadInput.value) / 100));
     window.addEventListener("resize", onResize);
     document.addEventListener("keydown", onKey);
+    window.addEventListener("pagehide", onPageHide);
 
-    const blob = await getModelBlob(node.data.modelAssetId);
-    if (!blob) throw new Error("模型文件丢失，请重新载入");
-    await controller.loadModel(blob, node.data.modelFormat);
+    if (node.data.modelAssetId) {
+      const blob = await getModelBlob(node.data.modelAssetId);
+      if (closed) return;
+      if (!blob) throw new Error("模型文件丢失，请重新载入");
+      await controller.loadModel(blob, node.data.modelFormat);
+      if (closed) return;
+    }
     // 还原上次视角与场景零件（若有），否则用 loadModel 的自动取景。
     if (node.data.view) controller.setState(node.data.view);
     controller.setFov(fovInput.value);
@@ -3653,7 +4584,19 @@ async function openModel3dEditor(nodeId) {
     refreshPanel();
     loaded = true;
     loadingEl.remove();
+    if (isDirector) {
+      directorUI = window.Director3D.mountUI({
+        overlay, controller, data: node.data.directorData,
+        getAspect: () => selectedRatio,
+        applyAspect: (value) => { selectedRatio = value; ratioSelect.value = value; updateMask(); },
+        syncCamera, save: saveScene, exportFrames: exportDirectorFrames, notice: showToast,
+        importModel: () => triggerModelUpload(nodeId), escapeHtml,
+      });
+      controller.resize(); updateMask();
+    }
+    overlay.querySelector('[data-m3d="fullscreen"]').focus();
   } catch (error) {
+    if (closed) return;
     if (loadingEl) loadingEl.textContent = `加载失败：${error.message}`;
     showToast(`3D 加载失败：${error.message}`);
   }
@@ -3695,7 +4638,7 @@ function blobToDataUrl(blob) {
 }
 
 function hydrateAssetImages() {
-  document.querySelectorAll(".generated-image[data-asset-url], video.result-video[data-asset-url]").forEach((el) => {
+  document.querySelectorAll(".generated-image[data-asset-url], .product-background-slot img[data-asset-url], video.result-video[data-asset-url]").forEach((el) => {
     const assetId = getIndexedImageId(el.dataset.assetUrl);
     if (!assetId || el.dataset.assetLoading === "1") return;
     if (imageAssetObjectUrls.has(assetId)) {
@@ -3751,6 +4694,7 @@ function getReferenceMaterialSlots(targetId) {
     .map((edge) => ({ edge, node: getNode(edge.source) }))
     .filter(({ node }) =>
       node?.type === "image" ||
+      (node?.type === "layerGroup" && node.data?.url) ||
       node?.type === "video" ||
       (node?.type === "model3dPreview" && node.data?.url));
   let imageN = 0;
@@ -3782,7 +4726,7 @@ function getTextMentionOptions(textNodeId) {
       return slots.map((ref) => ({
         ...ref,
         configId: config.id,
-        configLabel: config.data.label || (config.type === "videoConfig" ? "视频生成" : "文生图"),
+        configLabel: config.data.label || (config.type === "videoConfig" ? "视频生成" : "图片生成"),
       }));
     });
   const seen = new Set();
@@ -3888,17 +4832,89 @@ function addNode(type, position = getViewportCenter(), data = {}) {
   const defaults = {
     text: { label: "文本节点", content: "" },
     llmConfig: { label: "LLM 文本生成", model: getDefaultModel("chat") },
+    storyboardAssistant: { label: "分镜助手", model: getDefaultModel("chat"), requirements: "", output: "" },
     promptOptimizer: {
       label: "提示词优化",
       model: getDefaultModel("chat"),
       fields: { subject: "", structure: "", material: "", lighting: "", style: "", composition: "" },
     },
-    imageConfig: { label: "文生图", model: getDefaultModel("image"), quality: "标准画质", size: getImageSizeValue(getDefaultModel("image"), "2048x2048") },
+    imageConfig: {
+      label: "图片生成",
+      model: getDefaultModel("image"),
+      quality: "标准画质",
+      size: getImageSizeValue(getDefaultModel("image"), "2048x2048"),
+      outputFormat: "png",
+      promptOptimization: "standard",
+    },
     image: { label: "图片节点", url: false },
     imageCompare: { label: "图片对比", split: 50 },
-    imageExpand: { label: "图片扩展", padL: 0, padR: 0, padT: 0, padB: 0, lockRatio: false, prompt: "", model: "gpt-image-2" },
+    imageExpand: { label: "图片扩展", padL: 0, padR: 0, padT: 0, padB: 0, lockRatio: false, prompt: "", model: getDefaultModel("image") },
+    styleTransferConfig: {
+      label: "风格迁移",
+      model: getDefaultModel("image"),
+      size: getImageSizeValue(getDefaultModel("image"), "2048x2048"),
+      quality: "高清画质",
+      outputFormat: "png",
+      promptOptimization: "standard",
+      strength: "balanced",
+      extra: "",
+    },
+    materialTransferConfig: {
+      label: "材质迁移",
+      model: getDefaultModel("image"),
+      size: getImageSizeValue(getDefaultModel("image"), "2048x2048"),
+      quality: "高清画质",
+      outputFormat: "png",
+      promptOptimization: "standard",
+      strength: "balanced",
+      materialHint: "",
+      extra: "",
+    },
+    productBackgroundConfig: {
+      label: "产品换背景",
+      model: getDefaultModel("image"),
+      size: getImageSizeValue(getDefaultModel("image"), "2048x2048"),
+      quality: "高清画质",
+      outputFormat: "png",
+      promptOptimization: "standard",
+      aspectSource: "product",
+      extra: "",
+    },
+    faceSwapConfig: { label: "换脸", model: getDefaultModel("image"), size: getImageSizeValue(getDefaultModel("image"), "2048x2048"), quality: "高清画质", extra: "" },
+    seedreamEdit: {
+      label: "精确图片编辑",
+      providerId: "volc",
+      model: "doubao-seedream-5-0-pro-260628",
+      size: "2048x2048",
+      outputFormat: "png",
+      promptOptimization: "standard",
+      prompt: "",
+      annotation: { version: 1, width: 0, height: 0, marks: [] },
+    },
+    layerSeparation: {
+      label: "智能图层分离",
+      providerId: "volc",
+      model: "doubao-seedream-5-0-pro-260628",
+      prompt: "",
+      size: "auto",
+      promptOptimization: "standard",
+      seed: 0,
+      error: "",
+      pendingLayerResponse: null,
+      pendingLayerSourceRevision: "",
+    },
+    layerGroup: {
+      label: "图层组",
+      width: 1,
+      height: 1,
+      sourceNodeId: "",
+      compositeAssetId: "",
+      selectedLayerId: "",
+      url: "",
+      layers: [],
+    },
     model3dPreview: { label: "3D 模型预览", url: false, modelAssetId: "", modelName: "", modelFormat: "", renderMode: "clay", view: null },
-    videoConfig: { label: "视频生成", model: getDefaultModel("video"), videoMode: "reference", ratio: "16:9", seconds: 8 },
+    videoConfig: { label: "视频生成", model: getDefaultModel("video"), videoMode: "reference", ratio: "16:9", resolution: "720p", seconds: 8 },
     video: { label: "视频节点", url: false },
     storyboardConfig: {
       label: "故事板生成",
@@ -3942,12 +4958,28 @@ function addNode(type, position = getViewportCenter(), data = {}) {
     position: { x: position.x, y: position.y },
     data: { ...defaults[type], ...data },
   };
+  ensureNodeProvider(node);
   state.nodes = [...state.nodes, node];
   setSelectedNodes([node.id]);
   nodeMenu.hidden = true;
   saveState();
   render();
   return node.id;
+}
+
+function addImageTemplateNode(templateKey, position = getViewportCenter()) {
+  const templates = (typeof window !== "undefined" && window.IMAGE_TEMPLATES) || {};
+  const tpl = templates[templateKey];
+  if (!tpl) {
+    showToast("找不到指定的营销物料模板");
+    return null;
+  }
+  return addNode("templateImageConfig", position, {
+    label: tpl.label || "营销物料",
+    template: templateKey,
+    ...(tpl.defaults || {}),
+    size: getImageSizeValue(getDefaultModel("image"), tpl.size || "1024x1536"),
+  });
 }
 
 function addEdge(source, target, type = "default", data = {}) {
@@ -4039,7 +5071,8 @@ function hasApiKey(kind = "chat", providerId = "") {
   const group = backendConfig.providers?.[kind];
   if (!group) return false;
   const pid = providerId && group.items[providerId] ? providerId : group.default;
-  return Boolean(group.items?.[pid]?.configured);
+  const provider = group.items?.[pid];
+  return window.KlingProvider?.isCallableProvider(provider) ?? Boolean(provider?.configured);
 }
 
 async function apiFetch(path, options = {}) {
@@ -4076,7 +5109,10 @@ async function apiFetch(path, options = {}) {
     if (response.status === 402) {
       void refreshAuthUser();
     }
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    error.statusCode = response.status;
+    throw error;
   }
   if (response.ok && path.startsWith("/api/") && !path.startsWith("/api/auth/") && !path.startsWith("/api/billing/")) {
     void refreshAuthUser();
@@ -4090,9 +5126,11 @@ const seedreamImageSizes = [
   ["2048x2048", "1:1 · 2048×2048"],
   ["4096x2160", "16:9 · 4096×2160"],
 ];
+const seedream5ProImageSizes = window.SeedreamTools?.PRO_IMAGE_SIZES || [];
+const seedream5ImageSizes = window.SeedreamTools?.LITE_IMAGE_SIZES || [];
 const gptImageSizes = [
   ["1024x1024", "1:1 · 1024×1024"],
-  ["1536x1024", "16:9 · 1536×1024"],
+  ["1536x1024", "3:2 · 1536×1024"],
   ["1024x1536", "9:16 · 1024×1536"],
 ];
 const gptImage2ExtraSizes = [
@@ -4112,11 +5150,22 @@ const fluxImageRatios = [
 ];
 
 function isStandardImageModel(model) {
-  return [
-    "gpt-image-2",
+  return isGptImage2Model(model) || [
     "gemini-3-pro-image-preview",
     "gemini-3.1-flash-image-preview",
   ].includes(normalizeModelValue("image", model));
+}
+
+function isGptImage2Model(model) {
+  return window.GptImageModels.isModel(normalizeModelValue("image", model));
+}
+
+function isSeedream5ImageModel(model) {
+  return Boolean(window.SeedreamTools?.isSeedream5Model(normalizeModelValue("image", model)));
+}
+
+function isSeedream5ProImageModel(model) {
+  return Boolean(window.SeedreamTools?.isProModel(normalizeModelValue("image", model)));
 }
 
 function mapImageQuality(value) {
@@ -4138,11 +5187,22 @@ function mapImageQuality(value) {
   }
 }
 
+function imageQualityOptions(model) {
+  return isGptImage2Model(model) ? ["标准画质", "高清画质"] : ["标准画质", "高清画质", "4K"];
+}
+
+function getImageQualityValue(model, value) {
+  if (isGptImage2Model(model) && value === "4K") return "高清画质";
+  return imageQualityOptions(model).includes(value) ? value : "标准画质";
+}
+
 function isFluxImageModel(model) {
   return normalizeModelValue("image", model).toLowerCase().includes("flux");
 }
 
 function imageSizeOptions(model) {
+  const seedreamSizes = window.SeedreamTools?.imageSizeOptions(normalizeModelValue("image", model));
+  if (seedreamSizes) return seedreamSizes;
   if (isStandardImageModel(model)) {
     return [...gptImageSizes, ...gptImage2ExtraSizes];
   }
@@ -4152,11 +5212,56 @@ function imageSizeOptions(model) {
 
 function getImageSizeValue(model, size) {
   const value = String(size || "");
+  if (isGptImage2Model(model)) {
+    return window.GptImage2Sizes.inferPreset(value).size;
+  }
   const choices = imageSizeOptions(model);
   if (choices.some((pair) => pair[0] === value)) return value;
   if (isStandardImageModel(model)) return "1024x1024";
   if (isFluxImageModel(model)) return "1:1";
   return "2048x2048";
+}
+
+function gptImage2PresetFromData(data = {}) {
+  const exactSize = window.GptImage2Sizes.allPresets().find((preset) => preset.size === String(data.size || ""));
+  if (exactSize) return exactSize;
+  const selected = window.GptImage2Sizes.getPreset(data.sizeRatio, data.sizeTier);
+  if (selected) return selected;
+  const legacySize = data.sizeWidth !== undefined || data.sizeHeight !== undefined
+    ? `${data.sizeWidth || ""}x${data.sizeHeight || ""}`
+    : data.size;
+  return window.GptImage2Sizes.inferPreset(legacySize);
+}
+
+function gptImage2SizeFromData(data = {}) {
+  return gptImage2PresetFromData(data).size;
+}
+
+function applyGptImage2Preset(data, preset) {
+  const next = preset || gptImage2PresetFromData(data);
+  data.sizeRatio = next.ratio;
+  data.sizeTier = next.tier;
+  data.size = next.size;
+  delete data.sizeWidth;
+  delete data.sizeHeight;
+  return next;
+}
+
+function renderImageSizeControl(model, data, label = "尺寸") {
+  if (!isGptImage2Model(model)) {
+    return `<div class="node-row"><span>${escapeHtml(label)}</span><select data-field="size">${optionPairs(imageSizeOptions(model), getImageSizeValue(model, data.size))}</select></div>`;
+  }
+  const preset = gptImage2PresetFromData(data);
+  return `
+    <div class="node-row"><span>画面比例</span><select data-field="sizeRatio">${optionPairs(window.GptImage2Sizes.RATIO_OPTIONS, preset.ratio)}</select></div>
+    <div class="node-row"><span>${escapeHtml(label)}档位</span><select data-field="sizeTier">${optionPairs(window.GptImage2Sizes.TIER_OPTIONS, preset.tier)}</select></div>
+    <div class="gpt-image2-size-status valid">实际输出 ${escapeHtml(preset.size.replace("x", " × "))} · ${(preset.pixels / 1000000).toFixed(2)} MP</div>`;
+}
+
+function assertImageConfigSize(configNode) {
+  const model = normalizeModelValue("image", configNode?.data?.model) || getDefaultModel("image");
+  if (!isGptImage2Model(model)) return getImageSizeValue(model, configNode?.data?.size);
+  return window.GptImage2Sizes.assertSize(gptImage2SizeFromData(configNode.data));
 }
 
 // 3D 取景比例选项（label, 数值比例）。
@@ -4194,6 +5299,13 @@ function nearestByAspect(values, ar) {
   return best;
 }
 
+function imageSizeForAspect(model, aspect, preferredSize) {
+  if (isGptImage2Model(model)) {
+    return window.GptImage2Sizes.presetForAspect(aspect, preferredSize).size;
+  }
+  return nearestByAspect(imageSizeOptions(model).map((pair) => pair[0]), aspect);
+}
+
 function ratioNumOf(label) {
   const found = model3dRatios.find((r) => r[0] === label);
   return found ? found[1] : parseAspect(label) || 1;
@@ -4212,7 +5324,12 @@ function applyAspectToImageConfigs(nodeId, ar) {
     if (isMjImageModel(model)) {
       updateNode(cfg.id, { mjAr: nearestByAspect(mjAspectOptions, ar) });
     } else {
-      updateNode(cfg.id, { size: nearestByAspect(imageSizeOptions(model).map((p) => p[0]), ar) });
+      const preset = isGptImage2Model(model) ? window.GptImage2Sizes.presetForAspect(ar, cfg.data.size) : null;
+      const size = preset?.size || imageSizeForAspect(model, ar, cfg.data.size);
+      updateNode(cfg.id, {
+        size,
+        ...(preset ? { sizeRatio: preset.ratio, sizeTier: preset.tier } : {}),
+      });
     }
   });
   return cfgs.length;
@@ -4229,7 +5346,8 @@ function aspectLabelFromImageConfigs(nodeId) {
   return nearestByAspect(model3dRatios.map((r) => r[0]), ar);
 }
 
-function normalizeImageSize(size) {
+function normalizeImageSize(model, size) {
+  if (isSeedream5ImageModel(model)) return String(size);
   if (!size) return "2K";
   if (String(size).includes("4096")) return "4K";
   if (String(size).includes("2048")) return "2K";
@@ -4237,7 +5355,7 @@ function normalizeImageSize(size) {
 }
 
 function getNodePrompt(targetId) {
-  return incomingNodes(targetId, ["text", "llmConfig", "promptOptimizer"])
+  return incomingNodes(targetId, ["text", "llmConfig", "storyboardAssistant", "promptOptimizer"])
     .map((node) => {
       if (node.type === "promptOptimizer") return composeOptimizerPrompt(node.data.fields);
       return node.data.output || node.data.content || "";
@@ -4360,6 +5478,19 @@ async function polishWithApi(text, model = getDefaultModel("chat"), providerId =
   return data?.text || text;
 }
 
+async function storyboardAssistantWithApi(text, requirements = "", model = getDefaultModel("chat"), providerId = "") {
+  const data = await apiFetch("/api/chat/storyboard-assistant", {
+    method: "POST",
+    body: JSON.stringify({
+      providerId,
+      model: normalizeModelValue("chat", model) || getDefaultModel("chat"),
+      text,
+      requirements,
+    }),
+  });
+  return data?.text || "";
+}
+
 async function requestImageGeneration(configNode, prompt, refImages = []) {
   const body = buildImageGenerationBody(configNode, prompt, refImages);
 
@@ -4367,6 +5498,12 @@ async function requestImageGeneration(configNode, prompt, refImages = []) {
     method: "POST",
     body: JSON.stringify(body),
   });
+  if (data?.adapter === "kling-cli" && data?.id) {
+    const result = await pollKlingTask(data.id, "图片");
+    const source = result?.urls?.[0] || result?.video_url || "";
+    if (!source) throw new Error("可灵图片任务完成但未返回图片地址");
+    return persistImageSource(source);
+  }
   const source = extractImageSource(data);
   if (!source) throw new Error("图像接口未返回可显示的图片地址或 base64 数据");
   return persistImageSource(source);
@@ -4375,7 +5512,20 @@ async function requestImageGeneration(configNode, prompt, refImages = []) {
 function buildImageGenerationBody(configNode, prompt, refImages = []) {
   const model = normalizeModelValue("image", configNode.data.model) || getDefaultModel("image");
   const providerId = configNode.data.providerId || "";
-  const size = getImageSizeValue(model, configNode.data.size);
+  const size = isGptImage2Model(model)
+    ? assertImageConfigSize(configNode)
+    : getImageSizeValue(model, configNode.data.size);
+  const klingParams = getKlingRequestParams(configNode, "image", refImages.length);
+
+  if (klingParams) {
+    return {
+      providerId,
+      model,
+      prompt,
+      dynamicParams: klingParams,
+      ...(refImages.length ? { image: refImages } : {}),
+    };
+  }
 
   if (isStandardImageModel(model)) {
     const quality = mapImageQuality(configNode.data.quality);
@@ -4403,19 +5553,28 @@ function buildImageGenerationBody(configNode, prompt, refImages = []) {
     };
   }
 
+  const seedreamOptions = window.SeedreamTools?.buildGenerationOptions(model, {
+    size: normalizeImageSize(model, size),
+    outputFormat: configNode.data.outputFormat,
+    promptOptimization: configNode.data.promptOptimization,
+  });
   const body = {
     providerId,
     model,
     prompt,
-    sequential_image_generation: "disabled",
-    size: normalizeImageSize(size),
-    watermark: false,
+    ...(seedreamOptions || {
+      sequential_image_generation: "disabled",
+      size: normalizeImageSize(model, size),
+      watermark: false,
+    }),
   };
   if (refImages.length) body.image = refImages;
   return body;
 }
 
 function extractImageSource(payload) {
+  const seedreamItems = window.SeedreamTools?.extractImageItems(payload) || [];
+  if (seedreamItems[0]?.source) return seedreamItems[0].source;
   const visited = new Set();
   const preferredKeys = ["url", "image_url", "imageUrl", "output_url", "outputUrl", "b64_json", "base64", "image_base64"];
   const containerKeys = ["data", "images", "image", "output", "result", "results"];
@@ -4471,14 +5630,17 @@ function normalizeImageSource(value, hint = "") {
 async function requestVideoCreate(configNode, prompt, images = [], videos = []) {
   const model = normalizeModelValue("video", configNode.data.model) || getDefaultModel("video");
   const providerId = configNode.data.providerId || "";
+  const klingParams = getKlingRequestParams(configNode, "video", images.length);
   return apiFetch("/api/video/create", {
     method: "POST",
     body: JSON.stringify({
       providerId,
       model,
       prompt,
+      ...(klingParams ? { dynamicParams: klingParams } : {}),
       videoMode: getVideoMode(configNode.data),
       ratio: getVideoRatioValue(configNode.data),
+      resolution: getVideoResolutionValue(configNode.data),
       seconds: clamp(Number(configNode.data.seconds) || 8, videoSecondsMin, videoSecondsMax),
       ...(images.length ? { images } : {}),
       ...(videos.length ? { videos } : {}),
@@ -4487,8 +5649,24 @@ async function requestVideoCreate(configNode, prompt, images = [], videos = []) 
 }
 
 async function requestVideoQuery(taskId, providerId = "") {
+  if (providerId === "kling-cli") {
+    return apiFetch(`/api/kling/tasks/${encodeURIComponent(taskId)}`, { method: "GET" });
+  }
   const qp = providerId ? `&providerId=${encodeURIComponent(providerId)}` : "";
   return apiFetch(`/api/video/query?id=${encodeURIComponent(taskId)}${qp}`, { method: "GET" });
+}
+
+async function pollKlingTask(taskId, label = "任务") {
+  for (let attempt = 0; attempt < 180; attempt += 1) {
+    processingText.textContent = `可灵${label}生成中... ${attempt + 1}/180`;
+    const result = await apiFetch(`/api/kling/tasks/${encodeURIComponent(taskId)}`, { method: "GET" });
+    if (String(result?.status || "").toLowerCase() === "succeeded") return result;
+    if (String(result?.status || "").toLowerCase() === "failed") {
+      throw new Error(result?.error || "可灵任务失败");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+  throw new Error(`可灵${label}任务仍在生成中，可稍后使用任务 ID ${taskId} 继续查询`);
 }
 
 function generateGradient(seed = "") {
@@ -4537,6 +5715,12 @@ function friendlyImageError(message) {
 async function generateImage(configId) {
   const config = getNode(configId);
   if (!config) return;
+  try {
+    assertImageConfigSize(config);
+  } catch (error) {
+    showToast(error.message);
+    return;
+  }
   const prompt = normalizePromptReferenceMentions(getNodePrompt(configId) || "高质量 AI 生成图片");
   const refImageNodes = getImageReferenceSlots(configId).map((ref) => ref.node);
   const existing = findOutputImageNode(configId);
@@ -4576,6 +5760,798 @@ async function generateImage(configId) {
     processing.hidden = true;
     showToast(`图片生成失败：${error.message}`);
   }
+}
+
+// 换脸提示词：强制模型在底图统一光照下"重生成"脸，而不是抠图粘贴。图片1=底图，图片2=脸源。
+const FACE_SWAP_PROMPT = `这是一次"换脸"任务，给你两张参考图：
+- 图片1 是底图：必须完整保留它的发型、头部角度、姿态、身体、服装、背景、构图与整体光照。
+- 图片2 是脸源：只取这张图中人物的面部身份特征——五官形状、脸型、神态。
+
+要求：
+1. 把图片2人物的面容自然地重新生成到图片1人物的头部上，替换其面部，让来自图片2的人物身份清晰可辨。
+2. 这不是抠图粘贴：要在图片1的统一光照下重新渲染这张脸，使肤色、光线方向、色温、明暗过渡、阴影、噪点颗粒、清晰度都与图片1完全一致，边缘无缝融合。
+3. 除面部以外，图片1的一切都不要改变。
+4. 输出与图片1相同的画面和比例，只是人物换了脸，整体真实和谐，看不出后期痕迹。`;
+
+// 探测图片自然宽高比（用于让换脸输出跟随底图比例，避免裁切/拉伸）。
+function probeImageAspect(source) {
+  return new Promise((resolve) => {
+    (async () => {
+      try {
+        const display = await getDisplayImageUrl(source);
+        if (!display) return resolve(0);
+        const img = new Image();
+        img.onload = () => resolve(img.naturalWidth && img.naturalHeight ? img.naturalWidth / img.naturalHeight : 0);
+        img.onerror = () => resolve(0);
+        img.src = display;
+      } catch {
+        resolve(0);
+      }
+    })();
+  });
+}
+
+async function generateFaceSwap(configId) {
+  const config = getNode(configId);
+  if (!config) return;
+  const model = normalizeModelValue("image", config.data.model) || getDefaultModel("image");
+  if (isMjImageModel(model)) {
+    showToast("换脸请用 Gemini / gpt-image 这类编辑模型，Midjourney 不支持多图换脸");
+    return;
+  }
+  const slots = getImageReferenceSlots(configId);
+  if (slots.length < 2) {
+    showToast("需连接两张图片：第1张=底图，第2张=脸源");
+    return;
+  }
+  const baseNode = slots[0].node; // 底图（保留）
+  const faceNode = slots[1].node; // 脸源（取脸）
+  const extra = String(config.data.extra || "").trim();
+  const prompt = FACE_SWAP_PROMPT + (extra ? `\n\n额外要求：${extra}` : "");
+
+  const existing = findOutputImageNode(configId);
+  let imageId = existing?.id || null;
+  if (!imageId) {
+    imageId = addNode("image", { x: config.position.x + 390, y: config.position.y }, { label: "换脸结果", loading: true, model });
+    addEdge(configId, imageId, "output", { label: "输出" });
+  } else {
+    updateNode(imageId, { loading: true, url: false, error: "" });
+  }
+
+  const imgConfigured = hasApiKey("image", config.data.providerId);
+  showProcessing(imgConfigured ? "正在换脸..." : "未配置图像 API Key，使用本地模拟生成...");
+
+  if (!imgConfigured) {
+    setTimeout(() => {
+      updateNode(imageId, { loading: false, url: true, model, gradient: generateGradient("faceswap"), error: "" });
+      updateNode(configId, { executed: true });
+      hideProcessing("换脸完成（模拟）");
+    }, 850);
+    return;
+  }
+
+  try {
+    // 底图在前、脸源在后，与提示词里的"图片1/图片2"一一对应。
+    const refImages = (await Promise.all([baseNode, faceNode].map((n) => resolveImageForApi(n.data.url)))).filter(Boolean);
+    if (refImages.length < 2) throw new Error("参考图读取失败，请确认两张图片都已就绪");
+    // 输出尺寸跟随底图比例，保持构图和谐不裁切。
+    const ar = await probeImageAspect(baseNode.data.url);
+    const size = ar ? imageSizeForAspect(model, ar, config.data.size) : getImageSizeValue(model, config.data.size);
+    const cfg = { ...config, data: { ...config.data, model, size } };
+    const url = await requestImageGeneration(cfg, prompt, refImages);
+    updateNode(imageId, { loading: false, url, model, gradient: generateGradient("faceswap"), error: "" });
+    updateNode(configId, { executed: true });
+    hideProcessing("换脸完成");
+    void recordProjectHistory({ type: "image", url, prompt: "[换脸]", model });
+  } catch (error) {
+    const friendly = friendlyImageError(error.message);
+    updateNode(imageId, { loading: false, url: false, error: friendly });
+    processing.hidden = true;
+    showToast(`换脸失败：${error.message}`);
+  }
+}
+
+async function generateStyleTransfer(configId) {
+  const config = getNode(configId);
+  if (!config || config.type !== "styleTransferConfig") return;
+  const slots = getImageReferenceSlots(configId);
+  try {
+    window.StyleTransfer.validateInputCount(slots.length);
+  } catch (error) {
+    showToast(error.message);
+    return;
+  }
+  const contentNode = slots[0].node;
+  const styleNode = slots[1].node;
+  if (!contentNode?.data?.url || !styleNode?.data?.url) {
+    showToast("两张输入图片都需要先载入完成");
+    return;
+  }
+
+  const model = normalizeModelValue("image", config.data.model) || getDefaultModel("image");
+  if (isFluxImageModel(model)) {
+    showToast("风格迁移需要支持两张参考图的模型，请选择 GPT Image、Gemini、Seedream 或 Midjourney");
+    return;
+  }
+  const strength = window.StyleTransfer.normalizeStrength(config.data.strength);
+  const prompt = window.StyleTransfer.buildPrompt({ strength, extra: config.data.extra });
+  const existing = findOutputImageNode(configId);
+  let imageId = existing?.id || null;
+  if (!imageId) {
+    imageId = addNode("image", { x: config.position.x + 410, y: config.position.y }, { label: "风格迁移结果", loading: true, model });
+    addEdge(configId, imageId, "output", { label: "输出" });
+  } else {
+    updateNode(imageId, { label: "风格迁移结果", loading: true, url: false, error: "" });
+  }
+
+  const imgConfigured = hasApiKey("image", config.data.providerId);
+  showProcessing(imgConfigured ? "正在迁移图片风格..." : "未配置图像 API Key，使用本地模拟生成...");
+  if (!imgConfigured) {
+    setTimeout(() => {
+      updateNode(imageId, { loading: false, url: true, model, gradient: generateGradient(`style-transfer-${strength}`), error: "" });
+      updateNode(configId, { executed: true });
+      hideProcessing("风格迁移完成（模拟）");
+    }, 850);
+    return;
+  }
+
+  try {
+    const refImages = await Promise.all([contentNode, styleNode].map((node) => resolveImageForApi(node.data.url)));
+    if (refImages.some((source) => !source)) throw new Error("参考图读取失败，请确认两张图片都已就绪");
+    const aspect = await probeImageAspect(contentNode.data.url);
+    const nextData = { ...config.data, model };
+    if (isMjImageModel(model)) {
+      if (aspect) nextData.mjAr = nearestByAspect(mjAspectOptions, aspect);
+    } else if (aspect) {
+      nextData.size = imageSizeForAspect(model, aspect, config.data.size);
+    }
+    const requestConfig = { ...config, data: nextData };
+    const url = isMjImageModel(model)
+      ? await requestMjImageGeneration(requestConfig, prompt, refImages)
+      : await requestImageGeneration(requestConfig, prompt, refImages);
+    updateNode(imageId, { loading: false, url, model, gradient: generateGradient(`style-transfer-${strength}`), error: "" });
+    updateNode(configId, { executed: true });
+    hideProcessing("风格迁移完成");
+    void recordProjectHistory({ type: "image", url, prompt: `[风格迁移:${strength}]`, model });
+  } catch (error) {
+    const friendly = friendlyImageError(error.message);
+    updateNode(imageId, { loading: false, url: false, error: friendly });
+    processing.hidden = true;
+    showToast(`风格迁移失败：${error.message}`);
+  }
+}
+
+async function generateMaterialTransfer(configId) {
+  const config = getNode(configId);
+  if (!config || config.type !== "materialTransferConfig") return;
+  const slots = getImageReferenceSlots(configId);
+  try {
+    window.MaterialTransfer.validateInputCount(slots.length);
+  } catch (error) {
+    showToast(error.message);
+    return;
+  }
+  const structureNode = slots[0].node;
+  const materialNode = slots[1].node;
+  if (!structureNode?.data?.url || !materialNode?.data?.url) {
+    showToast("主体 / 结构图和材质参考图都需要先载入完成");
+    return;
+  }
+
+  const model = normalizeModelValue("image", config.data.model) || getDefaultModel("image");
+  if (isFluxImageModel(model)) {
+    showToast("材质迁移需要支持两张参考图的模型，请选择 GPT Image、Gemini、Seedream 或 Midjourney");
+    return;
+  }
+  const strength = window.MaterialTransfer.normalizeStrength(config.data.strength);
+  const prompt = window.MaterialTransfer.buildPrompt({
+    strength,
+    materialHint: config.data.materialHint,
+    extra: config.data.extra,
+  });
+  const existing = findOutputImageNode(configId);
+  let imageId = existing?.id || null;
+  if (!imageId) {
+    imageId = addNode("image", { x: config.position.x + 420, y: config.position.y }, { label: "材质迁移结果", loading: true, model });
+    addEdge(configId, imageId, "output", { label: "输出" });
+  } else {
+    updateNode(imageId, { label: "材质迁移结果", loading: true, url: false, error: "" });
+  }
+
+  const imgConfigured = hasApiKey("image", config.data.providerId);
+  showProcessing(imgConfigured ? "正在迁移主体材质..." : "未配置图像 API Key，使用本地模拟生成...");
+  if (!imgConfigured) {
+    setTimeout(() => {
+      updateNode(imageId, { loading: false, url: true, model, gradient: generateGradient(`material-transfer-${strength}`), error: "" });
+      updateNode(configId, { executed: true });
+      hideProcessing("材质迁移完成（模拟）");
+    }, 850);
+    return;
+  }
+
+  try {
+    // 第1张始终是结构母版，第2张始终是材质样本，顺序与提示词合同一致。
+    const refImages = await Promise.all([structureNode, materialNode].map((node) => resolveImageForApi(node.data.url)));
+    if (refImages.some((source) => !source)) throw new Error("参考图读取失败，请确认两张图片都已就绪");
+    const aspect = await probeImageAspect(structureNode.data.url);
+    const nextData = { ...config.data, model };
+    if (isMjImageModel(model)) {
+      if (aspect) nextData.mjAr = nearestByAspect(mjAspectOptions, aspect);
+    } else if (aspect) {
+      nextData.size = imageSizeForAspect(model, aspect, config.data.size);
+    }
+    const requestConfig = { ...config, data: nextData };
+    const url = isMjImageModel(model)
+      ? await requestMjImageGeneration(requestConfig, prompt, refImages)
+      : await requestImageGeneration(requestConfig, prompt, refImages);
+    updateNode(imageId, { loading: false, url, model, gradient: generateGradient(`material-transfer-${strength}`), error: "" });
+    updateNode(configId, { executed: true });
+    hideProcessing("材质迁移完成");
+    void recordProjectHistory({ type: "image", url, prompt: `[材质迁移:${strength}] ${String(config.data.materialHint || "").trim()}`.trim(), model });
+  } catch (error) {
+    const friendly = friendlyImageError(error.message);
+    updateNode(imageId, { loading: false, url: false, error: friendly });
+    processing.hidden = true;
+    showToast(`材质迁移失败：${error.message}`);
+  }
+}
+
+const activeProductBackgroundRuns = new Set();
+
+async function generateProductBackground(configId) {
+  const config = getNode(configId);
+  if (!config || config.type !== "productBackgroundConfig" || activeProductBackgroundRuns.has(configId)) return;
+  let inputs;
+  try { inputs = window.ProductBackground.validateInputs(getImageReferenceSlots(configId)); }
+  catch (error) { showToast(error.message); return; }
+  const model = normalizeModelValue("image", config.data.model) || getDefaultModel("image");
+  if (isFluxImageModel(model) || isMjImageModel(model)) {
+    showToast("产品换背景需要双图编辑模型，请选择 GPT Image、Gemini 或 Seedream");
+    return;
+  }
+  if (!hasApiKey("image", config.data.providerId)) {
+    showToast("请先配置所选图片模型的 API，再进行产品换背景");
+    return;
+  }
+
+  // 固定输入顺序和本次参数，后续上传或调整控件不会改变正在运行的任务。
+  const sources = [inputs.product.node.data.url, inputs.background.node.data.url];
+  const settings = { ...config.data, model };
+  const prompt = window.ProductBackground.buildPrompt(settings);
+  activeProductBackgroundRuns.add(configId);
+  const existing = findOutputImageNode(configId);
+  let imageId = existing?.id || null;
+  try {
+    if (!imageId) {
+      imageId = addNode("image", { x: config.position.x + 430, y: config.position.y }, { label: "产品换背景结果", loading: true, model });
+      addEdge(configId, imageId, "output", { label: "输出" });
+    } else {
+      updateNode(imageId, { label: "产品换背景结果", loading: true, url: false, error: "" });
+    }
+    showProcessing("正在更换产品背景并统一光影...");
+    const refImages = await Promise.all(sources.map((source) => resolveImageForApi(source)));
+    if (refImages.some((source) => !source)) throw new Error("输入图片读取失败，请重新载入产品图和背景图");
+    const aspectIndex = window.ProductBackground.normalizeAspectSource(settings.aspectSource) === "background" ? 1 : 0;
+    const aspect = await probeImageAspect(sources[aspectIndex]);
+    if (aspect) settings.size = imageSizeForAspect(model, aspect, settings.size);
+    const url = await requestImageGeneration({ ...config, data: settings }, prompt, refImages);
+    updateNode(imageId, { loading: false, url, model, error: "" });
+    updateNode(configId, { executed: true });
+    hideProcessing("产品换背景完成");
+    void recordProjectHistory({ type: "image", url, prompt, model });
+  } catch (error) {
+    if (imageId) updateNode(imageId, { loading: false, url: false, error: friendlyImageError(error.message) });
+    processing.hidden = true;
+    showToast(`产品换背景失败：${error.message}`);
+  } finally {
+    activeProductBackgroundRuns.delete(configId);
+    render();
+  }
+}
+
+function triggerProductBackgroundUpload(configId, role) {
+  if (activeProductBackgroundRuns.has(configId)) return;
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/png,image/jpeg,image/webp";
+  input.addEventListener("change", async () => {
+    const file = input.files?.[0];
+    const config = getNode(configId);
+    if (!file || !config || activeProductBackgroundRuns.has(configId)) return;
+    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) { showToast("请上传 PNG、JPEG 或 WebP 图片"); return; }
+    try {
+      const url = await persistImageBlob(file);
+      if (!getNode(configId) || activeProductBackgroundRuns.has(configId)) return;
+      const assigned = window.ProductBackground.assignInputs(getImageReferenceSlots(configId));
+      const previous = assigned[role];
+      const label = role === "background" ? "背景图" : "产品图";
+      // 上传替换只换此节点的输入连线，保留原素材供其他工作流继续使用。
+      if (previous) removeEdge(previous.edge.id);
+      const id = addNode("image", { x: config.position.x - 350, y: config.position.y + (role === "background" ? nodeSizes.image.height + 40 : 0) }, { label, url });
+      addEdge(id, configId, "imageOrder", { label });
+      showToast(`已载入${label}`);
+    } catch (error) { showToast(`载入失败：${error.message}`); }
+  });
+  input.click();
+}
+
+async function generateSeedreamEdit(configId) {
+  const config = getNode(configId);
+  if (!config || config.type !== "seedreamEdit") return;
+  const model = normalizeModelValue("image", config.data.model) || "doubao-seedream-5-0-pro-260628";
+  if (!isSeedream5ProImageModel(model)) {
+    showToast("精确图片编辑需要选择豆包 Seedream 5.0 Pro");
+    return;
+  }
+  const slots = getImageReferenceSlots(configId);
+  if (!slots[0]?.node?.data?.url) {
+    showToast("先连接一张待编辑原图");
+    return;
+  }
+  if (slots.length > 10) {
+    showToast("Seedream 5.0 Pro 最多支持 10 张输入图片");
+    return;
+  }
+  const marks = Array.isArray(config.data.annotation?.marks) ? config.data.annotation.marks : [];
+  const prompt = window.SeedreamTools.buildPreciseEditPrompt(
+    String(config.data.prompt || "").trim() || "按照标记位置精确编辑图片，使修改自然融入原画面。",
+    marks,
+  );
+  const existing = findOutputImageNode(configId);
+  let imageId = existing?.id || null;
+  if (!imageId) {
+    imageId = addNode("image", { x: config.position.x + 420, y: config.position.y }, { label: "精确编辑结果", loading: true, model });
+    addEdge(configId, imageId, "output", { label: "编辑结果" });
+  } else {
+    updateNode(imageId, { loading: true, url: false, error: "" });
+  }
+
+  const configured = hasApiKey("image", config.data.providerId);
+  showProcessing(configured ? "正在执行 Seedream 精确编辑..." : "未配置火山图片 API Key，使用本地模拟生成...");
+  if (!configured) {
+    setTimeout(() => {
+      updateNode(imageId, { loading: false, url: true, model, gradient: generateGradient("seedream-edit"), error: "" });
+      updateNode(configId, { executed: true });
+      hideProcessing("精确编辑完成（模拟）");
+    }, 850);
+    return;
+  }
+
+  try {
+    const baseNode = slots[0].node;
+    const baseSource = marks.length
+      ? await renderAnnotatedImage(baseNode.data.url, config.data.annotation)
+      : await resolveImageForApi(baseNode.data.url);
+    const extraSources = (await Promise.all(slots.slice(1).map((slot) => resolveImageForApi(slot.node.data.url)))).filter(Boolean);
+    if (!baseSource) throw new Error("待编辑原图读取失败");
+    const aspect = await probeImageAspect(baseNode.data.url);
+    const size = aspect
+      ? nearestByAspect(imageSizeOptions(model).map(([value]) => value), aspect)
+      : getImageSizeValue(model, config.data.size);
+    const requestConfig = { ...config, data: { ...config.data, model, size } };
+    const url = await requestImageGeneration(requestConfig, prompt, [baseSource, ...extraSources]);
+    updateNode(imageId, { loading: false, url, model, gradient: generateGradient("seedream-edit"), error: "" });
+    updateNode(configId, { executed: true, size });
+    hideProcessing("精确编辑完成");
+    void recordProjectHistory({ type: "image", url, prompt, model });
+  } catch (error) {
+    updateNode(imageId, { loading: false, url: false, error: friendlyImageError(error.message) });
+    processing.hidden = true;
+    showToast(`精确编辑失败：${error.message}`);
+  }
+}
+
+function findOutputLayerGroupNode(configId) {
+  return state.edges
+    .filter((edge) => edge.source === configId)
+    .map((edge) => getNode(edge.target))
+    .find((node) => node?.type === "layerGroup");
+}
+
+async function requestLayerSeparation(configNode, source) {
+  const body = window.SeedreamTools.buildLayerSeparationBody({
+    providerId: configNode.data.providerId || "volc",
+    model: normalizeModelValue("image", configNode.data.model) || "doubao-seedream-5-0-pro-260628",
+    prompt: configNode.data.prompt,
+    size: configNode.data.size,
+    seed: configNode.data.seed,
+    promptOptimization: configNode.data.promptOptimization,
+  }, source);
+  return apiFetch("/api/images/generations", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+function serializableLayerResponse(parsed) {
+  const entries = [parsed?.background, ...(parsed?.layers || [])];
+  if (!entries.length || entries.some((entry) => !/^https?:\/\//i.test(String(entry?.source || "")))) return null;
+  const clean = (entry) => ({
+    source: entry.source,
+    name: entry.name || "",
+    description: entry.description || "",
+    role: entry.role || "layer",
+    zIndex: Number(entry.zIndex) || 0,
+    responseIndex: Number(entry.responseIndex) || 0,
+    bbox: entry.bbox ? { ...entry.bbox } : null,
+    flags: [...(entry.flags || [])],
+  });
+  return { background: clean(parsed.background), layers: parsed.layers.map(clean) };
+}
+
+function imageSourceRevision(source) {
+  const text = String(source || "");
+  const sample = text.length <= 4096 ? text : `${text.slice(0, 2048)}${text.slice(-2048)}`;
+  let hash = 2166136261;
+  for (let index = 0; index < sample.length; index += 1) {
+    hash ^= sample.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${text.length}:${(hash >>> 0).toString(16)}`;
+}
+
+async function materializeLayerGroup(config, sourceNode, parsed) {
+  const layerEntries = [parsed.background, ...parsed.layers];
+  const stored = await Promise.all(layerEntries.map((entry) => persistLayerImageSource(entry.source)));
+  const assets = stored.map((asset) => ({
+    assetId: asset.assetId,
+    nativeWidth: asset.width,
+    nativeHeight: asset.height,
+  }));
+  const groupData = window.SeedreamTools.createLayerGroupData(parsed, assets, {
+    label: `${sourceNode.data.label || "图片"} · 图层组`,
+    sourceNodeId: sourceNode.id,
+  });
+  const composite = await composeLayerGroupDataUrl(groupData);
+  const compositeSentinel = await persistCanvasDataUrl(composite);
+  groupData.compositeAssetId = getIndexedImageId(compositeSentinel);
+  groupData.url = compositeSentinel;
+
+  const existing = findOutputLayerGroupNode(config.id);
+  if (existing) {
+    updateNode(existing.id, groupData);
+  } else {
+    const groupId = addNode("layerGroup", { x: config.position.x + 390, y: config.position.y }, groupData);
+    addEdge(config.id, groupId, "output", { label: "图层文档" });
+  }
+  return parsed.layers.length;
+}
+
+async function refreshLayerGroupComposite(groupId) {
+  const group = getNode(groupId);
+  if (!group || group.type !== "layerGroup" || !group.data.layers?.length) return "";
+  const dataUrl = await composeLayerGroupDataUrl(group.data);
+  const sentinel = await persistCanvasDataUrl(dataUrl);
+  updateNode(groupId, { compositeAssetId: getIndexedImageId(sentinel), url: sentinel });
+  return sentinel;
+}
+
+async function generateLayerSeparation(configId) {
+  const config = getNode(configId);
+  if (!config || config.type !== "layerSeparation") return;
+  const model = normalizeModelValue("image", config.data.model) || "doubao-seedream-5-0-pro-260628";
+  if (!isSeedream5ProImageModel(model)) {
+    updateNode(configId, { error: "智能图层分离仅支持豆包 Seedream 5.0 Pro。" });
+    showToast("智能图层分离需要选择豆包 Seedream 5.0 Pro");
+    return;
+  }
+  const slots = getImageReferenceSlots(configId);
+  if (slots.length !== 1 || !slots[0]?.node?.data?.url) {
+    updateNode(configId, { error: "请只连接一张待拆分原图。" });
+    showToast("智能图层分离需要且只能连接一张原图");
+    return;
+  }
+  const sourceNode = slots[0].node;
+  const sourceRevision = imageSourceRevision(sourceNode.data.url);
+  const dimensions = await probeImageDimensions(sourceNode.data.url);
+  const aspect = dimensions.height ? dimensions.width / dimensions.height : 0;
+  if (!dimensions.width || !dimensions.height) {
+    updateNode(configId, { error: "无法读取原图尺寸，请重新载入图片。" });
+    return;
+  }
+  if (Math.min(dimensions.width, dimensions.height) < 512 || aspect < 1 / 16 || aspect > 16) {
+    updateNode(configId, { error: "原图短边需至少 512px，宽高比需在 1:16～16:1 内。" });
+    showToast("原图尺寸不符合图层分离要求");
+    return;
+  }
+  if (config.data.pendingLayerResponse) {
+    if (config.data.pendingLayerSourceRevision !== sourceRevision) {
+      updateNode(configId, { pendingLayerResponse: null, pendingLayerSourceRevision: "", error: "原图已经变化，已丢弃旧图层的待导入记录；请重新点击分离。" });
+      showToast("原图已变化，请重新点击图层分离");
+      return;
+    }
+    updateNode(configId, { error: "", loading: true });
+    showProcessing("正在重新下载并导入已生成的图层...");
+    try {
+      const count = await materializeLayerGroup(config, sourceNode, config.data.pendingLayerResponse);
+      updateNode(configId, { executed: true, loading: false, error: "", pendingLayerResponse: null, pendingLayerSourceRevision: "" });
+      hideProcessing(`图层导入完成：背景 + ${count} 个透明图层`);
+    } catch (error) {
+      updateNode(configId, { loading: false, error: `已生成图层仍未导入：${error.message}` });
+      processing.hidden = true;
+      showToast(`图层导入失败：${error.message}`);
+    }
+    return;
+  }
+  if (!hasApiKey("image", config.data.providerId || "volc")) {
+    updateNode(configId, { error: "尚未配置火山方舟图片 API Key；图层分离不提供模拟结果。" });
+    showToast("请先在设置中配置火山方舟图片 API Key");
+    return;
+  }
+
+  updateNode(configId, { error: "", loading: true });
+  showProcessing("Seedream 正在识别主体并生成透明图层...");
+  try {
+    const source = await resolveImageForApi(sourceNode.data.url);
+    if (!source) throw new Error("原图读取失败");
+    const response = await requestLayerSeparation({ ...config, data: { ...config.data, model } }, source);
+    const parsed = window.SeedreamTools.parseLayerResponse(response);
+    const pendingLayerResponse = serializableLayerResponse(parsed);
+    if (pendingLayerResponse) updateNode(configId, { pendingLayerResponse, pendingLayerSourceRevision: sourceRevision });
+    const count = await materializeLayerGroup(config, sourceNode, parsed);
+    updateNode(configId, { executed: true, loading: false, error: "", pendingLayerResponse: null, pendingLayerSourceRevision: "" });
+    hideProcessing(`图层分离完成：背景 + ${count} 个透明图层`);
+  } catch (error) {
+    updateNode(configId, { loading: false, error: error.message || "图层分离失败" });
+    processing.hidden = true;
+    showToast(`图层分离失败：${error.message}`);
+  }
+}
+
+function layerGroupToImage(groupId) {
+  const group = getNode(groupId);
+  if (!group || group.type !== "layerGroup" || !group.data.url) return;
+  const imageId = addNode("image", { x: group.position.x + 410, y: group.position.y }, {
+    label: `${group.data.label || "图层组"} · 合成图`,
+    url: group.data.url,
+  });
+  addEdge(groupId, imageId, "output", { label: "合成图" });
+}
+
+function extractLayerAsImage(groupId, layerId) {
+  const group = getNode(groupId);
+  const layer = group?.data?.layers?.find((item) => item.id === layerId);
+  if (!group || !layer?.assetId) return;
+  const imageId = addNode("image", { x: group.position.x + 410, y: group.position.y + 80 }, {
+    label: layer.name || "提取图层",
+    url: `${imageAssetPrefix}${layer.assetId}`,
+  });
+  addEdge(groupId, imageId, "output", { label: layer.name || "提取图层" });
+  showToast(`已将「${layer.name || "图层"}」提取为图片节点`);
+}
+
+async function openLayerGroupEditor(groupId) {
+  const group = getNode(groupId);
+  if (!group || group.type !== "layerGroup" || !group.data.layers?.length) return;
+  const draft = typeof structuredClone === "function"
+    ? structuredClone(group.data)
+    : JSON.parse(JSON.stringify(group.data));
+  let selectedId = draft.selectedLayerId || draft.layers.find((layer) => layer.role !== "background")?.id || draft.layers[0].id;
+  const imageCache = new Map();
+  const overlay = document.createElement("div");
+  overlay.className = "layer-editor-overlay";
+  overlay.innerHTML = `
+    <section class="layer-editor-dialog" role="dialog" aria-modal="true" aria-label="图层编辑器">
+      <header class="layer-editor-head">
+        <div><strong>Seedream 图层编辑器</strong><small>${Math.round(draft.width)} × ${Math.round(draft.height)} · 移动、等比缩放、排序与透明度</small></div>
+        <button type="button" data-layer-action="close" aria-label="关闭">×</button>
+      </header>
+      <div class="layer-editor-body">
+        <div class="layer-editor-stage"><canvas></canvas></div>
+        <aside class="layer-editor-side">
+          <div class="layer-editor-side-title">图层</div>
+          <div class="layer-editor-list"></div>
+          <div class="layer-editor-inspector"></div>
+        </aside>
+      </div>
+      <footer class="layer-editor-foot">
+        <span>拖动图层移动；拖动四角控制点等比缩放</span>
+        <button type="button" class="node-secondary-button" data-layer-action="cancel">取消</button>
+        <button type="button" class="node-button" data-layer-action="apply">应用到画布</button>
+      </footer>
+    </section>`;
+  document.body.append(overlay);
+
+  const canvas = overlay.querySelector("canvas");
+  const ctx = canvas.getContext("2d");
+  const listEl = overlay.querySelector(".layer-editor-list");
+  const inspectorEl = overlay.querySelector(".layer-editor-inspector");
+  canvas.width = Math.max(1, Math.round(draft.width));
+  canvas.height = Math.max(1, Math.round(draft.height));
+
+  try {
+    await Promise.all(draft.layers.map(async (layer) => {
+      if (!layer.assetId || imageCache.has(layer.assetId)) return;
+      imageCache.set(layer.assetId, await loadCanvasImage(`${imageAssetPrefix}${layer.assetId}`));
+    }));
+  } catch (error) {
+    overlay.remove();
+    showToast(`图层资源加载失败：${error.message}`);
+    return;
+  }
+
+  const sortedTopFirst = () => [...draft.layers].sort((a, b) => Number(b.zIndex) - Number(a.zIndex));
+  const selectedLayer = () => draft.layers.find((layer) => layer.id === selectedId) || null;
+  const canvasPoint = (event) => {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left) * canvas.width / Math.max(1, rect.width),
+      y: (event.clientY - rect.top) * canvas.height / Math.max(1, rect.height),
+      tolerance: 12 * canvas.width / Math.max(1, rect.width),
+    };
+  };
+
+  function drawEditorCanvas() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (const layer of window.SeedreamTools.layerRenderPlan(draft.layers)) {
+      const image = imageCache.get(layer.assetId);
+      if (!image) continue;
+      ctx.globalAlpha = layer.opacity;
+      ctx.drawImage(image, Number(layer.x) || 0, Number(layer.y) || 0, Number(layer.width) || image.naturalWidth, Number(layer.height) || image.naturalHeight);
+    }
+    ctx.globalAlpha = 1;
+    const layer = selectedLayer();
+    if (!layer || layer.visible === false) return;
+    const x = Number(layer.x) || 0;
+    const y = Number(layer.y) || 0;
+    const width = Number(layer.width) || 1;
+    const height = Number(layer.height) || 1;
+    const handle = Math.max(7, canvas.width / 220);
+    ctx.save();
+    ctx.strokeStyle = "#8b5cf6";
+    ctx.lineWidth = Math.max(2, canvas.width / 800);
+    ctx.setLineDash([handle, handle * 0.7]);
+    ctx.strokeRect(x, y, width, height);
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#8b5cf6";
+    [[x, y], [x + width, y], [x, y + height], [x + width, y + height]].forEach(([hx, hy]) => {
+      ctx.fillRect(hx - handle, hy - handle, handle * 2, handle * 2);
+    });
+    ctx.restore();
+  }
+
+  function renderLayerPanel() {
+    listEl.innerHTML = sortedTopFirst().map((layer) => `
+      <div class="layer-editor-row ${layer.id === selectedId ? "active" : ""} ${layer.visible === false ? "muted" : ""}" data-layer-id="${escapeHtml(layer.id)}">
+        <button type="button" title="显示/隐藏" data-layer-op="visible">${layer.visible === false ? "◌" : "◉"}</button>
+        <button type="button" class="layer-editor-name" data-layer-op="select">${escapeHtml(layer.name || "未命名图层")}</button>
+        <button type="button" title="锁定" data-layer-op="lock" ${layer.role === "background" ? "disabled" : ""}>${layer.locked ? "🔒" : "◇"}</button>
+        <button type="button" title="上移" data-layer-op="up" ${layer.role === "background" ? "disabled" : ""}>↑</button>
+        <button type="button" title="下移" data-layer-op="down" ${layer.role === "background" ? "disabled" : ""}>↓</button>
+      </div>`).join("");
+    const layer = selectedLayer();
+    inspectorEl.innerHTML = layer ? `
+      <label>名称<input type="text" data-layer-field="name" value="${escapeHtml(layer.name || "")}"></label>
+      <label>不透明度 <b>${Math.round((Number(layer.opacity) || 0) * 100)}%</b><input type="range" min="0" max="1" step="0.01" data-layer-field="opacity" value="${Number(layer.opacity) || 0}"></label>
+      <div class="layer-editor-geometry">X ${Math.round(layer.x)} · Y ${Math.round(layer.y)} · ${Math.round(layer.width)} × ${Math.round(layer.height)}</div>
+      <button type="button" class="node-secondary-button" data-layer-action="extract" ${layer.assetId ? "" : "disabled"}>提取为图片节点</button>
+      ${layer.flags?.length ? `<small>提示：${escapeHtml(layer.flags.join(", "))}</small>` : ""}` : "";
+  }
+
+  function refreshEditor() {
+    drawEditorCanvas();
+    renderLayerPanel();
+  }
+
+  listEl.addEventListener("click", (event) => {
+    const row = event.target.closest("[data-layer-id]");
+    const operation = event.target.closest("[data-layer-op]")?.dataset.layerOp;
+    if (!row || !operation) return;
+    selectedId = row.dataset.layerId;
+    const layer = selectedLayer();
+    if (!layer) return;
+    if (operation === "visible") layer.visible = layer.visible === false;
+    if (operation === "lock" && layer.role !== "background") layer.locked = !layer.locked;
+    if (operation === "up") draft.layers = window.SeedreamTools.reorderLayer(draft.layers, layer.id, 1);
+    if (operation === "down") draft.layers = window.SeedreamTools.reorderLayer(draft.layers, layer.id, -1);
+    refreshEditor();
+  });
+
+  inspectorEl.addEventListener("input", (event) => {
+    const layer = selectedLayer();
+    if (!layer) return;
+    if (event.target.dataset.layerField === "name") layer.name = event.target.value;
+    if (event.target.dataset.layerField === "opacity") layer.opacity = Number(event.target.value);
+    drawEditorCanvas();
+    if (event.target.dataset.layerField === "opacity") {
+      const label = inspectorEl.querySelector("label b");
+      if (label) label.textContent = `${Math.round(layer.opacity * 100)}%`;
+    }
+  });
+
+  let drag = null;
+  canvas.addEventListener("pointerdown", (event) => {
+    const point = canvasPoint(event);
+    let layer = selectedLayer();
+    const hitLayer = [...sortedTopFirst()].find((candidate) => candidate.visible !== false
+      && point.x >= candidate.x && point.x <= candidate.x + candidate.width
+      && point.y >= candidate.y && point.y <= candidate.y + candidate.height);
+    const insideSelected = layer && point.x >= layer.x && point.x <= layer.x + layer.width && point.y >= layer.y && point.y <= layer.y + layer.height;
+    if (hitLayer && (!layer || layer.role === "background" || layer.visible === false || !insideSelected)) {
+      selectedId = hitLayer.id;
+      layer = hitLayer;
+      refreshEditor();
+    }
+    if (!layer || layer.locked) return;
+    const corners = {
+      nw: { x: layer.x, y: layer.y },
+      ne: { x: layer.x + layer.width, y: layer.y },
+      sw: { x: layer.x, y: layer.y + layer.height },
+      se: { x: layer.x + layer.width, y: layer.y + layer.height },
+    };
+    const corner = Object.entries(corners).find(([, value]) => Math.hypot(point.x - value.x, point.y - value.y) <= point.tolerance)?.[0] || "";
+    if (!corner && !(point.x >= layer.x && point.x <= layer.x + layer.width && point.y >= layer.y && point.y <= layer.y + layer.height)) return;
+    const opposite = { nw: "se", ne: "sw", sw: "ne", se: "nw" }[corner];
+    drag = {
+      mode: corner ? "resize" : "move",
+      corner,
+      startPoint: point,
+      startLayer: { ...layer },
+      anchor: opposite ? corners[opposite] : null,
+    };
+    canvas.setPointerCapture(event.pointerId);
+  });
+
+  canvas.addEventListener("pointermove", (event) => {
+    if (!drag) return;
+    const point = canvasPoint(event);
+    const index = draft.layers.findIndex((layer) => layer.id === selectedId);
+    if (index < 0) return;
+    if (drag.mode === "move") {
+      draft.layers[index] = window.SeedreamTools.moveLayer(drag.startLayer, point.x - drag.startPoint.x, point.y - drag.startPoint.y);
+    } else {
+      const startDistance = Math.hypot(drag.startPoint.x - drag.anchor.x, drag.startPoint.y - drag.anchor.y) || 1;
+      const currentDistance = Math.hypot(point.x - drag.anchor.x, point.y - drag.anchor.y);
+      draft.layers[index] = window.SeedreamTools.resizeLayerFromCorner(drag.startLayer, drag.corner, currentDistance / startDistance);
+    }
+    drawEditorCanvas();
+  });
+  const stopDrag = (event) => {
+    if (!drag) return;
+    drag = null;
+    try { canvas.releasePointerCapture(event.pointerId); } catch {}
+    refreshEditor();
+  };
+  canvas.addEventListener("pointerup", stopDrag);
+  canvas.addEventListener("pointercancel", stopDrag);
+
+  let onKeyDown = null;
+  const closeEditor = () => {
+    if (onKeyDown) document.removeEventListener("keydown", onKeyDown);
+    overlay.remove();
+  };
+  overlay.addEventListener("click", async (event) => {
+    const action = event.target.closest("[data-layer-action]")?.dataset.layerAction;
+    if (!action) return;
+    if (action === "close" || action === "cancel") closeEditor();
+    if (action === "extract") extractLayerAsImage(groupId, selectedId);
+    if (action === "apply") {
+      const button = event.target.closest("button");
+      button.disabled = true;
+      button.textContent = "正在合成...";
+      try {
+        draft.selectedLayerId = selectedId;
+        const dataUrl = await composeLayerGroupDataUrl(draft);
+        const sentinel = await persistCanvasDataUrl(dataUrl);
+        draft.compositeAssetId = getIndexedImageId(sentinel);
+        draft.url = sentinel;
+        commitHistory();
+        updateNode(groupId, draft);
+        closeEditor();
+        showToast("图层编辑已应用到画布");
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = "应用到画布";
+        showToast(`图层合成失败：${error.message}`);
+      }
+    }
+  });
+  onKeyDown = (event) => {
+    if (event.key !== "Escape") return;
+    closeEditor();
+  };
+  document.addEventListener("keydown", onKeyDown);
+  refreshEditor();
 }
 
 async function requestMjImageGeneration(configNode, prompt, refImages = []) {
@@ -4736,6 +6712,12 @@ async function generateStoryboard(configId) {
     showToast("先填一个主题");
     return;
   }
+  try {
+    assertImageConfigSize(config);
+  } catch (error) {
+    showToast(error.message);
+    return;
+  }
   const prompt = buildStoryboardPrompt(config);
   const contract = buildStoryboardContract(config);
   const existing = state.edges
@@ -4782,6 +6764,12 @@ async function generateStoryboard(configId) {
 async function generateTemplateImage(configId) {
   const config = getNode(configId);
   if (!config || config.type !== "templateImageConfig") return;
+  try {
+    assertImageConfigSize(config);
+  } catch (error) {
+    showToast(error.message);
+    return;
+  }
   const templates = (typeof window !== "undefined" && window.IMAGE_TEMPLATES) || {};
   const tpl = templates[config.data.template] || templates[Object.keys(templates)[0]];
   if (!tpl) {
@@ -4910,23 +6898,61 @@ function inferConnection(sourceId, targetId) {
   if (target?.type === "imageCompare" && source?.type === "image") return { type: "imageOrder", label: "对比图" };
   if (source?.type === "imageExpand" && target?.type === "image") return { type: "output", label: "输出" };
   if (target?.type === "imageExpand" && source?.type === "image") return { type: "imageOrder", label: "原图" };
+  if (source?.type === "styleTransferConfig" && target?.type === "image") return { type: "output", label: "输出" };
+  if (target?.type === "styleTransferConfig" && ["image", "layerGroup", "model3dPreview"].includes(source?.type)) {
+    const existing = getImageReferenceSlots(targetId).length;
+    return { type: "imageOrder", label: window.StyleTransfer.connectionLabel(existing) };
+  }
+  if (source?.type === "materialTransferConfig" && target?.type === "image") return { type: "output", label: "输出" };
+  if (target?.type === "materialTransferConfig" && ["image", "layerGroup", "model3dPreview"].includes(source?.type)) {
+    const existing = getImageReferenceSlots(targetId).length;
+    return { type: "imageOrder", label: window.MaterialTransfer.connectionLabel(existing) };
+  }
+  if (source?.type === "productBackgroundConfig" && target?.type === "image") return { type: "output", label: "输出" };
+  if (target?.type === "productBackgroundConfig" && ["image", "layerGroup", "model3dPreview"].includes(source?.type)) {
+    return { type: "imageOrder", label: window.ProductBackground.nextConnectionLabel(getImageReferenceSlots(targetId)) };
+  }
   if (target?.type === "promptOptimizer" && source?.type === "text") return { type: "promptOrder", label: "原始创意" };
-  if (target?.type === "imageConfig" && ["text", "llmConfig", "promptOptimizer"].includes(source?.type)) return { type: "promptOrder", label: "提示词" };
+  if (target?.type === "storyboardAssistant" && ["text", "llmConfig", "promptOptimizer"].includes(source?.type)) return { type: "promptOrder", label: "故事/概念" };
+  if (target?.type === "imageConfig" && ["text", "llmConfig", "storyboardAssistant", "promptOptimizer"].includes(source?.type)) return { type: "promptOrder", label: "提示词" };
   if (target?.type === "imageConfig" && source?.type === "image") return { type: "imageOrder", label: "参考图" };
-  if (target?.type === "videoConfig" && ["text", "llmConfig", "promptOptimizer"].includes(source?.type)) return { type: "promptOrder", label: "提示词" };
-  if (target?.type === "videoConfig" && source?.type === "image") return { type: "imageRole", label: "首帧" };
+  if (source?.type === "faceSwapConfig" && target?.type === "image") return { type: "output", label: "输出" };
+  if (target?.type === "faceSwapConfig" && source?.type === "image") {
+    // 连线先后决定角色：第1张=底图，第2张=脸源。
+    const existing = state.edges.filter((e) => e.target === targetId && getNode(e.source)?.type === "image").length;
+    const label = existing === 0 ? "底图" : existing === 1 ? "脸源" : `参考图${existing + 1}`;
+    return { type: "imageOrder", label };
+  }
+  if (source?.type === "seedreamEdit" && target?.type === "image") return { type: "output", label: "编辑结果" };
+  if (target?.type === "seedreamEdit" && ["image", "layerGroup"].includes(source?.type)) {
+    const existing = state.edges.filter((edge) => edge.target === targetId && ["image", "layerGroup"].includes(getNode(edge.source)?.type)).length;
+    return { type: "imageOrder", label: existing === 0 ? "待编辑原图" : `参考图 ${existing + 1}` };
+  }
+  if (target?.type === "layerSeparation" && source?.type === "image") return { type: "imageOrder", label: "原图" };
+  if (source?.type === "layerSeparation" && target?.type === "layerGroup") return { type: "output", label: "图层文档" };
+  if (source?.type === "layerGroup" && target?.type === "image") return { type: "output", label: "合成图" };
+  if (source?.type === "layerGroup" && target?.type === "imageConfig") return { type: "imageOrder", label: "参考图" };
+  if (target?.type === "videoConfig" && ["text", "llmConfig", "storyboardAssistant", "promptOptimizer"].includes(source?.type)) return { type: "promptOrder", label: "提示词" };
+  if (target?.type === "videoConfig" && ["image", "layerGroup"].includes(source?.type)) return { type: "imageRole", label: "首帧" };
   return { type: "default", label: "连接" };
 }
 
 const connectionDropTargets = {
   text: [
+    { type: "storyboardAssistant", label: "+ 分镜助手" },
     { type: "promptOptimizer", label: "+ 提示词优化" },
-    { type: "imageConfig", label: "+ 文生图" },
+    { type: "imageConfig", label: "+ 图片生成" },
     { type: "videoConfig", label: "+ 文生视频" },
     { type: "storyboardConfig", label: "+ 故事板生成" },
   ],
   llmConfig: [
-    { type: "imageConfig", label: "+ 文生图" },
+    { type: "storyboardAssistant", label: "+ 分镜助手" },
+    { type: "imageConfig", label: "+ 图片生成" },
+    { type: "videoConfig", label: "+ 文生视频" },
+    { type: "storyboardConfig", label: "+ 故事板生成" },
+  ],
+  storyboardAssistant: [
+    { type: "imageConfig", label: "+ 图片生成" },
     { type: "videoConfig", label: "+ 文生视频" },
     { type: "storyboardConfig", label: "+ 故事板生成" },
   ],
@@ -4934,12 +6960,18 @@ const connectionDropTargets = {
     { type: "image", label: "+ 图像结果" },
   ],
   promptOptimizer: [
-    { type: "imageConfig", label: "+ 文生图" },
+    { type: "imageConfig", label: "+ 图片生成" },
     { type: "videoConfig", label: "+ 文生视频" },
   ],
   image: [
-    { type: "imageConfig", label: "+ 文生图(用作参考图)" },
+    { type: "imageConfig", label: "+ 图片生成(用作参考图)" },
+    { type: "styleTransferConfig", label: "+ 风格迁移(用作内容图)" },
+    { type: "productBackgroundConfig", label: "+ 产品换背景(用作产品图)" },
+    { type: "materialTransferConfig", label: "+ 材质迁移(用作主体/结构)" },
+    { type: "seedreamEdit", label: "+ Seedream 精确编辑" },
+    { type: "layerSeparation", label: "+ Seedream 智能图层分离" },
     { type: "templateImageConfig", label: "+ 营销物料(用作产品图)" },
+    { type: "faceSwapConfig", label: "+ 换脸" },
     { type: "imageCompare", label: "+ 图片对比" },
     { type: "imageExpand", label: "+ 图片扩展" },
     { type: "videoConfig", label: "+ 文生视频(用作首帧)" },
@@ -4950,11 +6982,42 @@ const connectionDropTargets = {
   imageConfig: [
     { type: "image", label: "+ 图像结果" },
   ],
+  faceSwapConfig: [
+    { type: "image", label: "+ 换脸结果" },
+  ],
+  styleTransferConfig: [
+    { type: "image", label: "+ 风格迁移结果" },
+  ],
+  materialTransferConfig: [
+    { type: "image", label: "+ 材质迁移结果" },
+  ],
+  productBackgroundConfig: [
+    { type: "image", label: "+ 产品换背景结果" },
+  ],
+  seedreamEdit: [
+    { type: "image", label: "+ 精确编辑结果" },
+  ],
+  layerSeparation: [
+    { type: "layerGroup", label: "+ 可编辑图层组" },
+  ],
+  layerGroup: [
+    { type: "image", label: "+ 合成图片" },
+    { type: "productBackgroundConfig", label: "+ 产品换背景(用作产品图)" },
+    { type: "imageConfig", label: "+ 图片生成(用作参考图)" },
+    { type: "materialTransferConfig", label: "+ 材质迁移(用作主体/结构)" },
+    { type: "seedreamEdit", label: "+ Seedream 精确编辑" },
+    { type: "videoConfig", label: "+ 视频生成(用作首帧)" },
+  ],
   videoConfig: [
     { type: "video", label: "+ 视频结果" },
   ],
   storyboardConfig: [
     { type: "image", label: "+ 故事板图像" },
+  ],
+  model3dPreview: [
+    { type: "productBackgroundConfig", label: "+ 产品换背景(用作产品图)" },
+    { type: "materialTransferConfig", label: "+ 材质迁移(用作主体/结构)" },
+    { type: "imageConfig", label: "+ 图片生成(用作参考图)" },
   ],
 };
 
@@ -5024,12 +7087,28 @@ async function refreshNode(id) {
     await runLlmNode(id);
     return;
   }
+  if (node.type === "storyboardAssistant") {
+    await runStoryboardAssistantNode(id);
+    return;
+  }
   if (node.type === "promptOptimizer") {
     await runPromptOptimizerNode(id);
     return;
   }
   if (node.type === "imageConfig") {
     generateImage(id);
+    return;
+  }
+  if (node.type === "styleTransferConfig") {
+    generateStyleTransfer(id);
+    return;
+  }
+  if (node.type === "materialTransferConfig") {
+    generateMaterialTransfer(id);
+    return;
+  }
+  if (node.type === "productBackgroundConfig") {
+    generateProductBackground(id);
     return;
   }
   if (node.type === "templateImageConfig") {
@@ -5040,11 +7119,47 @@ async function refreshNode(id) {
     generateImageExpand(id);
     return;
   }
+  if (node.type === "faceSwapConfig") {
+    generateFaceSwap(id);
+    return;
+  }
+  if (node.type === "seedreamEdit") {
+    generateSeedreamEdit(id);
+    return;
+  }
+  if (node.type === "layerSeparation") {
+    generateLayerSeparation(id);
+    return;
+  }
+  if (node.type === "layerGroup") {
+    try {
+      await refreshLayerGroupComposite(id);
+      showToast("图层组合成图已刷新");
+    } catch (error) {
+      showToast(`图层合成失败：${error.message}`);
+    }
+    return;
+  }
   if (node.type === "videoConfig") {
     generateVideo(id);
     return;
   }
   if (node.type === "image") {
+    const materialConfig = incomingNodes(id, ["materialTransferConfig"])[0];
+    const productBackgroundConfig = incomingNodes(id, ["productBackgroundConfig"])[0];
+    if (productBackgroundConfig) {
+      generateProductBackground(productBackgroundConfig.id);
+      return;
+    }
+    if (materialConfig) {
+      generateMaterialTransfer(materialConfig.id);
+      return;
+    }
+    const styleConfig = incomingNodes(id, ["styleTransferConfig"])[0];
+    if (styleConfig) {
+      generateStyleTransfer(styleConfig.id);
+      return;
+    }
     const tplConfig = incomingNodes(id, ["templateImageConfig"])[0];
     if (tplConfig) {
       generateTemplateImage(tplConfig.id);
@@ -5076,6 +7191,34 @@ async function runLlmNode(id) {
   } catch (error) {
     processing.hidden = true;
     showToast(`文本生成失败：${error.message}`);
+  }
+}
+
+function getStoryboardAssistantSource(id) {
+  return incomingNodes(id, ["text", "llmConfig", "promptOptimizer"])
+    .map((node) => {
+      if (node.type === "promptOptimizer") return composeOptimizerPrompt(node.data.fields);
+      return node.data.output || node.data.content || "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+async function runStoryboardAssistantNode(id) {
+  const node = getNode(id);
+  if (!node) return;
+  const source = getStoryboardAssistantSource(id);
+  const requirements = node.data.requirements || "";
+  showProcessing(hasApiKey("chat", node.data.providerId) ? "正在调用分镜助手..." : "未配置文本 API Key，使用本地分镜模板...");
+  try {
+    const output = hasApiKey("chat", node.data.providerId)
+      ? await storyboardAssistantWithApi(source, requirements, node.data.model, node.data.providerId)
+      : localStoryboardAssistant(source, requirements);
+    updateNode(id, { output });
+    hideProcessing("分镜方案已生成");
+  } catch (error) {
+    processing.hidden = true;
+    showToast(`分镜助手失败：${error.message}`);
   }
 }
 
@@ -5160,7 +7303,21 @@ function updateConnectionPreview(clientX, clientY) {
 async function generateVideo(configId) {
   const config = getNode(configId);
   if (!config) return;
-  const ratio = getVideoRatioValue(config.data);
+  const runningOutput = findOutputVideoNode(configId);
+  if (runningOutput?.data?.loading && runningOutput.data.taskId) {
+    showToast("已有视频任务在生成，请勿重复提交");
+    return;
+  }
+  let ratio = getVideoRatioValue(config.data);
+  const klingContext = klingContextForNode(config, "video");
+  if (klingContext && window.KlingProvider?.videoRatioForSpec) {
+    const firstImage = getImageReferenceSlots(configId)[0]?.node;
+    const imageAspect = firstImage?.data?.url ? await probeImageAspect(firstImage.data.url) : 0;
+    const inputRatio = imageAspect
+      ? nearestByAspect(videoAspectOptions.filter((value) => value !== "adaptive"), imageAspect)
+      : "";
+    ratio = window.KlingProvider.videoRatioForSpec(klingContext.spec, klingStoredParams(config), inputRatio, ratio);
+  }
   // 已连了视频结果节点就复用，不再新建
   const existing = findOutputVideoNode(configId);
   let videoId = existing?.id;
@@ -5201,29 +7358,94 @@ async function generateVideo(configId) {
     updateNode(configId, { executed: true });
     hideProcessing("视频任务已完成");
   } catch (error) {
-    updateNode(videoId, { label: "生成失败", loading: false, error: error.message });
-    processing.hidden = true;
-    showToast(`视频生成失败：${error.message}`);
+    handleVideoPollingError(videoId, error);
+  }
+}
+
+function videoProviderForPolling(providerId = "") {
+  const group = backendConfig.providers?.video;
+  if (!group) return null;
+  const resolvedId = providerId && group.items?.[providerId] ? providerId : group.default;
+  return group.items?.[resolvedId] || null;
+}
+
+function handleVideoPollingError(videoId, error) {
+  const pending = Boolean(error?.pollingPending);
+  updateNode(videoId, {
+    label: pending ? "视频仍在生成" : "生成失败",
+    loading: false,
+    error: error.message,
+  });
+  processing.hidden = true;
+  showToast(`${pending ? "视频任务仍在生成" : "视频生成失败"}：${error.message}`);
+}
+
+async function resumeVideoTask(videoId) {
+  const videoNode = getNode(videoId);
+  const taskId = String(videoNode?.data?.taskId || "");
+  if (!taskId) {
+    showToast("该视频节点没有可查询的任务 ID");
+    return;
+  }
+  const providerId = videoNode.data.providerId || "";
+  updateNode(videoId, { label: "视频生成中...", loading: true, error: "" });
+  showProcessing("正在继续查询已有视频任务...");
+  try {
+    await pollVideoTask(videoId, taskId, providerId);
+    const config = incomingNodes(videoId, ["videoConfig"])[0];
+    if (config) updateNode(config.id, { executed: true });
+    hideProcessing("视频任务已完成");
+  } catch (error) {
+    handleVideoPollingError(videoId, error);
   }
 }
 
 async function pollVideoTask(videoId, taskId, providerId = "") {
-  for (let attempt = 0; attempt < 24; attempt += 1) {
-    processingText.textContent = `视频生成中，正在查询任务... ${attempt + 1}/24`;
-    const result = await requestVideoQuery(taskId, providerId);
+  const provider = videoProviderForPolling(providerId);
+  const policy = window.VideoPolling?.policyFor(providerId, provider)
+    || { initialDelayMs: 0, intervalMs: 5000, maxAttempts: providerId === "kling-cli" ? 180 : 24 };
+  if (policy.initialDelayMs > 0) {
+    processingText.textContent = "视频任务已创建，等待上游登记...";
+    await new Promise((resolve) => setTimeout(resolve, policy.initialDelayMs));
+  }
+  let lastTransientError = "";
+  const maxAttempts = policy.maxAttempts;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    processingText.textContent = `视频生成中，正在查询任务... ${attempt + 1}/${maxAttempts}`;
+    let result;
+    try {
+      result = await requestVideoQuery(taskId, providerId);
+      lastTransientError = "";
+    } catch (error) {
+      if (!window.VideoPolling?.isRetryableError(error)) throw error;
+      lastTransientError = error.message;
+      processingText.textContent = `上游任务正在登记或繁忙，稍后重试... ${attempt + 1}/${maxAttempts}`;
+      if (attempt < maxAttempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, policy.intervalMs));
+        continue;
+      }
+      break;
+    }
     if (result?.video_url) {
-      updateNode(videoId, { label: "视频生成结果", loading: false, url: result.video_url, taskId, gradient: generateGradient(taskId) });
+      updateNode(videoId, { label: "视频生成结果", loading: false, url: result.video_url, taskId, gradient: generateGradient(taskId), error: "" });
       const videoNode = getNode(videoId);
-      void recordProjectHistory({ type: "video", url: result.video_url, prompt: "", model: videoNode?.data?.model || "" });
+      const saved = await recordProjectHistory({ type: "video", url: result.video_url, prompt: "", model: videoNode?.data?.model || "" });
+      // 上游视频链接会过期；落盘成功后切到持久的本地回流地址，刷新画布后仍可播放。
+      if (saved?.fileUrl && getNode(videoId)) updateNode(videoId, { url: saved.fileUrl });
       return;
     }
-    if (["failed", "error", "canceled"].includes(String(result?.status || "").toLowerCase())) {
+    if (["failed", "error", "canceled", "cancelled"].includes(String(result?.status || "").toLowerCase())) {
       throw new Error(result?.error || `任务状态：${result.status}`);
     }
-    await new Promise((resolve) => setTimeout(resolve, 5000));
+    if (attempt < maxAttempts - 1) {
+      await new Promise((resolve) => setTimeout(resolve, policy.intervalMs));
+    }
   }
-  updateNode(videoId, { label: "视频生成中...", loading: true, taskId });
-  throw new Error("任务仍在生成中，请稍后通过任务 ID 查询");
+  const error = new Error(lastTransientError
+    ? `任务暂时无法查询（${lastTransientError}），请稍后继续查询`
+    : "任务仍在生成中，请稍后继续查询");
+  error.pollingPending = true;
+  throw error;
 }
 
 function createImageToImage(imageId) {
@@ -5234,6 +7456,50 @@ function createImageToImage(imageId) {
   addEdge(imageId, configId, "imageOrder", { label: "参考图 1" });
   addEdge(textId, configId, "promptOrder", { label: "提示词 1" });
   showToast("已创建图生图工作流");
+}
+
+function createStyleTransferFromImage(imageId) {
+  const image = getNode(imageId);
+  if (!image) return;
+  const configId = addNode("styleTransferConfig", { x: image.position.x + 340, y: image.position.y }, { label: "风格迁移" });
+  addEdge(imageId, configId, "imageOrder", { label: "内容图" });
+  showToast("已连接为内容图，再把风格参考图连进来即可");
+}
+
+function createMaterialTransferFromSource(sourceId) {
+  const source = getNode(sourceId);
+  if (!source || !["image", "layerGroup", "model3dPreview"].includes(source.type)) return;
+  if (!source.data?.url) {
+    showToast(source.type === "model3dPreview" ? "先在 3D 模型预览里截取当前视角" : "先准备好主体 / 结构图");
+    return;
+  }
+  const configId = addNode("materialTransferConfig", { x: source.position.x + 350, y: source.position.y }, { label: "材质迁移" });
+  addEdge(sourceId, configId, "imageOrder", { label: "主体 / 结构" });
+  showToast("已连接为主体 / 结构，再把材质参考图连进来即可");
+}
+
+function createProductBackgroundFromSource(sourceId) {
+  const source = getNode(sourceId);
+  if (!source || !["image", "layerGroup", "model3dPreview"].includes(source.type)) return;
+  const configId = addNode("productBackgroundConfig", { x: source.position.x + 350, y: source.position.y });
+  addEdge(sourceId, configId, "imageOrder", { label: "产品图" });
+  showToast("已连接产品图，上传或连接背景图即可");
+}
+
+function createSeedreamPreciseEdit(imageId) {
+  const image = getNode(imageId);
+  if (!image) return;
+  const configId = addNode("seedreamEdit", { x: image.position.x + 340, y: image.position.y }, { label: "精确图片编辑" });
+  addEdge(imageId, configId, "imageOrder", { label: "待编辑原图" });
+  showToast("已创建 Seedream 精确编辑节点");
+}
+
+function createSeedreamLayerSeparation(imageId) {
+  const image = getNode(imageId);
+  if (!image || image.type !== "image") return;
+  const configId = addNode("layerSeparation", { x: image.position.x + 340, y: image.position.y }, { label: "智能图层分离" });
+  addEdge(imageId, configId, "imageOrder", { label: "原图" });
+  showToast("已创建 Seedream 智能图层分离节点");
 }
 
 function createImageToVideo(imageId) {
@@ -5248,6 +7514,71 @@ function createImageToVideo(imageId) {
 
 function polishText(text) {
   return `${text}，高质量细节，清晰主体，统一风格，电影级光影，构图完整，适合 AI 图像/视频生成。`;
+}
+
+function localStoryboardAssistant(text, requirements = "") {
+  const subject = String(text || "").trim() || "一个需要影视化呈现的场景";
+  const extra = String(requirements || "").trim();
+  return `关键假设：${subject}${extra ? `；补充要求：${extra}` : ""}。
+
+场景目标：
+- 这场戏用于交代核心人物/事件，并通过镜头递进建立情绪。
+- 观众需要接收到：人物处境、环境关系、关键动作和情绪变化。
+- 情绪从建立氛围 → 信息推进 → 关键反应 → 收束到下一动作。
+
+镜头结构思路：
+- 先用环境镜头建立空间和时间。
+- 再用中景/全景明确人物位置与动作关系。
+- 用近景/特写推动情绪和信息重点。
+- 最后用反应镜头或细节镜头作为剪辑连接点。
+
+逐镜分镜：
+1. 远景 / 环境建立
+画面内容：展示主要场景、时间、天气和人物所在空间。
+机位 / 运镜：固定机位或缓慢推进。
+情绪 / 叙事作用：建立氛围与空间关系。
+时长建议：3-4 秒。
+AI生成建议：优先生成静帧，统一角色外观、服装、光线和场景材质。
+
+2. 全景 / 人物进入关系
+画面内容：人物进入画面或处在核心动作开始前的位置。
+机位 / 运镜：平视或轻微低角度，保持空间连续。
+情绪 / 叙事作用：明确角色与环境的关系。
+时长建议：3 秒。
+AI生成建议：约束人物服装、姿态、道具，不要更换场景。
+
+3. 中景 / 事件推进
+画面内容：人物执行关键动作，画面中保留可识别环境线索。
+机位 / 运镜：跟拍、轻推或横移。
+情绪 / 叙事作用：推动剧情进入主要事件。
+时长建议：4-5 秒。
+AI生成建议：适合视频生成，动作描述要具体且单一。
+
+4. 近景 / 情绪反应
+画面内容：人物表情、视线或手部细节变化。
+机位 / 运镜：稳定近景，浅景深。
+情绪 / 叙事作用：让观众理解人物心理。
+时长建议：2-3 秒。
+AI生成建议：作为关键画面先生成静帧，重点锁定脸、服装、光线。
+
+5. 特写 / 信息重点
+画面内容：关键道具、动作细节或视线落点。
+机位 / 运镜：特写，轻微推近。
+情绪 / 叙事作用：强化转折或信息提示。
+时长建议：2 秒。
+AI生成建议：拆成独立镜头，避免同画面里同时塞入过多动作。
+
+6. 中远景 / 收束与转场
+画面内容：人物完成动作，空间关系重新展开，为下一场留下方向。
+机位 / 运镜：缓慢拉远或切空镜。
+情绪 / 叙事作用：收束本场，形成转场余韵。
+时长建议：3-4 秒。
+AI生成建议：可作为补镜或转场镜头，保持色调和材质一致。
+
+关键画面优先级：
+- 镜头1：建立场景视觉锚点。
+- 镜头4：锁定角色脸和情绪。
+- 镜头5：锁定剧情信息点。`;
 }
 
 function getViewportCenter() {
@@ -5350,6 +7681,8 @@ function showContextMenu(event) {
   const top = clamp(event.clientY, 8, window.innerHeight - rect.height - 8);
   contextMenu.style.left = `${left}px`;
   contextMenu.style.top = `${top}px`;
+  contextMenu.classList.toggle("submenu-left", left + rect.width + 232 > window.innerWidth - 8);
+  contextMenu.classList.toggle("submenu-up", top + rect.height + 190 > window.innerHeight - 8);
   contextMenu.style.visibility = "";
 }
 
@@ -5370,6 +7703,11 @@ function renderContextMenu() {
     items.push({ action: "save-image", label: "保存图片" });
     items.push({ kind: "separator" });
     items.push({ action: "image-to-image", label: "创建图生图" });
+    items.push({ action: "style-transfer", label: "创建风格迁移" });
+    items.push({ action: "product-background", label: "创建产品换背景" });
+    items.push({ action: "material-transfer", label: "创建材质迁移" });
+    items.push({ action: "seedream-precise-edit", label: "Seedream 精确编辑" });
+    items.push({ action: "seedream-layer-separation", label: "Seedream 智能图层分离" });
     items.push({ action: "image-to-video", label: "创建生视频" });
     if (nodeGroupId) items.push({ action: "remove-node-from-group", label: "移除群组" });
     return items.map(renderContextMenuItem).join("");
@@ -5406,29 +7744,44 @@ function renderContextMenu() {
     items.push({ action: "duplicate-node", label: "复制节点" });
     if (node.type === "image") {
       items.push({ action: "image-to-image", label: "创建图生图" });
+      items.push({ action: "style-transfer", label: "创建风格迁移" });
+      items.push({ action: "product-background", label: "创建产品换背景" });
+      items.push({ action: "material-transfer", label: "创建材质迁移" });
+      items.push({ action: "seedream-precise-edit", label: "Seedream 精确编辑" });
+      items.push({ action: "seedream-layer-separation", label: "Seedream 智能图层分离" });
       items.push({ action: "image-to-video", label: "创建生视频" });
     }
+    if (node.type === "layerGroup") {
+      items.push({ action: "open-layer-editor", label: "编辑图层" });
+      items.push({ action: "layer-group-to-image", label: "合成为图片" });
+      items.push({ action: "product-background", label: "创建产品换背景" });
+      items.push({ action: "material-transfer", label: "创建材质迁移" });
+    }
+    if (node.type === "model3dPreview") items.push({ action: "material-transfer", label: "创建材质迁移" });
+    if (node.type === "model3dPreview") items.push({ action: "product-background", label: "创建产品换背景" });
     if (nodeGroupId) items.push({ action: "remove-node-from-group", label: "移除群组" });
     items.push({ kind: "separator" });
     items.push({ action: "delete-node", label: "删除节点", danger: true });
     items.push({ kind: "separator" });
-  } else {
-    items.push({ kind: "title", label: "新建节点" });
   }
 
-  items.push({ action: "add-text", label: "文本节点" });
-  items.push({ action: "add-llm", label: "LLM 文本生成" });
-  items.push({ action: "add-image-config", label: "文生图配置" });
-  items.push({ action: "add-storyboard-config", label: "故事板生成" });
-  items.push({ action: "add-template-image-config", label: "营销物料" });
-  items.push({ action: "add-video-config", label: "视频生成配置" });
-  items.push({ action: "add-image", label: "图片节点" });
-  items.push({ action: "add-image-compare", label: "图片对比" });
-  items.push({ action: "add-image-expand", label: "图片扩展" });
-  items.push({ action: "add-model3d", label: "3D 模型预览" });
-  items.push({ action: "add-uploaded-image", label: "载入图像" });
-  items.push({ action: "add-uploaded-video", label: "载入视频" });
-  items.push({ action: "add-video", label: "视频节点" });
+  const [favoriteSection, ...categorySections] = contextMenuModel.creationSections(contextMenuFavorites);
+  items.push({ kind: "title", label: favoriteSection.label });
+  if (favoriteSection.items.length) {
+    items.push(...favoriteSection.items.map((item) => ({ ...item, kind: "node", favorited: true })));
+  } else {
+    items.push({ kind: "hint", label: "点击分类中的 ☆ 添加常用" });
+  }
+  items.push({ kind: "separator" });
+  items.push(...categorySections.map((section) => ({
+    kind: "submenu",
+    label: section.label,
+    items: section.items.map((item) => ({
+      ...item,
+      kind: "node",
+      favorited: contextMenuFavorites.includes(item.action),
+    })),
+  })));
   items.push({ kind: "separator" });
   items.push({ action: "fit-view", label: "适配视图" });
 
@@ -5438,6 +7791,29 @@ function renderContextMenu() {
 function renderContextMenuItem(item) {
   if (item.kind === "title") return `<div class="context-menu-title">${escapeHtml(item.label)}</div>`;
   if (item.kind === "separator") return `<div class="context-menu-separator"></div>`;
+  if (item.kind === "hint") return `<div class="context-menu-hint">${escapeHtml(item.label)}</div>`;
+  if (item.kind === "submenu") {
+    return `
+      <div class="context-menu-submenu">
+        <button type="button" class="context-menu-submenu-trigger">
+          <span>${escapeHtml(item.label)}</span><span class="context-menu-chevron">›</span>
+        </button>
+        <div class="context-menu-submenu-panel">
+          <div class="context-menu-title">${escapeHtml(item.label)}</div>
+          ${item.items.map(renderContextMenuItem).join("")}
+        </div>
+      </div>
+    `;
+  }
+  if (item.kind === "node") {
+    const favoriteLabel = item.favorited ? "移出常用" : "加入常用";
+    return `
+      <div class="context-menu-node-row">
+        <button type="button" class="context-menu-node-action" data-context-action="${escapeHtml(item.action)}">${escapeHtml(item.label)}</button>
+        <button type="button" class="context-menu-favorite-toggle" data-favorite-action="${escapeHtml(item.action)}" aria-label="${favoriteLabel}：${escapeHtml(item.label)}" aria-pressed="${item.favorited ? "true" : "false"}" title="${favoriteLabel}">${item.favorited ? "★" : "☆"}</button>
+      </div>
+    `;
+  }
   return `<button class="${item.danger ? "danger" : ""}" data-context-action="${escapeHtml(item.action)}">${escapeHtml(item.label)}</button>`;
 }
 
@@ -5451,6 +7827,13 @@ function handleContextAction(action) {
   if (action === "duplicate-node" && nodeId) duplicateNode(nodeId);
   if (action === "delete-node" && nodeId) removeNode(nodeId);
   if (action === "image-to-image" && nodeId) createImageToImage(nodeId);
+  if (action === "style-transfer" && nodeId) createStyleTransferFromImage(nodeId);
+  if (action === "material-transfer" && nodeId) createMaterialTransferFromSource(nodeId);
+  if (action === "product-background" && nodeId) createProductBackgroundFromSource(nodeId);
+  if (action === "seedream-precise-edit" && nodeId) createSeedreamPreciseEdit(nodeId);
+  if (action === "seedream-layer-separation" && nodeId) createSeedreamLayerSeparation(nodeId);
+  if (action === "open-layer-editor" && nodeId) openLayerGroupEditor(nodeId);
+  if (action === "layer-group-to-image" && nodeId) layerGroupToImage(nodeId);
   if (action === "image-to-video" && nodeId) createImageToVideo(nodeId);
   if (action === "preview-image" && imageSource) openImagePreview(imageSource);
   if (action === "save-image" && imageSource) saveImageSource(imageSource);
@@ -5469,11 +7852,18 @@ function handleContextAction(action) {
   const typeByAction = {
     "add-text": "text",
     "add-llm": "llmConfig",
+    "add-storyboard-assistant": "storyboardAssistant",
     "add-prompt-optimizer": "promptOptimizer",
     "add-image-config": "imageConfig",
     "add-video-config": "videoConfig",
     "add-storyboard-config": "storyboardConfig",
     "add-template-image-config": "templateImageConfig",
+    "add-style-transfer-config": "styleTransferConfig",
+    "add-material-transfer-config": "materialTransferConfig",
+    "add-product-background-config": "productBackgroundConfig",
+    "add-face-swap-config": "faceSwapConfig",
+    "add-seedream-edit": "seedreamEdit",
+    "add-layer-separation": "layerSeparation",
     "add-image-compare": "imageCompare",
     "add-image-expand": "imageExpand",
     "add-image": "image",
@@ -5481,6 +7871,8 @@ function handleContextAction(action) {
     "add-model3d": "model3dPreview",
   };
   if (typeByAction[action]) addNode(typeByAction[action], worldPoint);
+  if (action === "add-director3d") addDirector3dNode(worldPoint);
+  if (action === "add-forced-perspective-poster") addImageTemplateNode("forced-perspective-poster", worldPoint);
   if (action === "add-uploaded-image") {
     const size = nodeSizes.image;
     createUploadedImageNode(null, worldPoint ? { x: worldPoint.x - size.width / 2, y: worldPoint.y - size.height / 2 } : undefined);
@@ -5492,7 +7884,17 @@ function handleContextAction(action) {
 }
 
 function applyTheme() {
-  document.body.classList.toggle("dark", state.theme === "dark");
+  const theme = themeStyles.presentation(state.theme);
+  state.theme = theme.state;
+  document.body.classList.toggle("dark", theme.state === "dark");
+  document.body.dataset.theme = theme.id;
+  const themeButton = document.querySelector("[data-action='theme']");
+  if (!themeButton) return;
+  themeButton.title = `当前：${theme.label}；切换到${theme.nextLabel}`;
+  themeButton.setAttribute("aria-label", `切换到${theme.nextLabel}`);
+  themeButton.innerHTML = theme.state === "dark"
+    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>'
+    : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a7 7 0 1 0 9 9 5.5 5.5 0 0 1-9-9z"/></svg>';
 }
 
 function screenToWorld(clientX, clientY) {
@@ -5659,21 +8061,48 @@ function cancelCanvasDrag(event) {
 }
 
 // ===== 图片扩展节点 =====
-// 目标输出尺寸 = 原图尺寸 × (1 + 各边 pad)，最长边封顶 2048。
+// 目标输出尺寸 = 原图尺寸 × (1 + 各边 pad)。GPT Image 2 自动吸附到上游允许的 16px 网格。
+function fitExpandDimensions(width, height, model) {
+  if (isGptImage2Model(model)) return window.GptImage2Sizes.fitDimensions(width, height);
+  let w = width;
+  let h = height;
+  const cap = 2048;
+  const maxEdge = Math.max(w, h);
+  if (maxEdge > cap) {
+    w = (w * cap) / maxEdge;
+    h = (h * cap) / maxEdge;
+  }
+  return { valid: true, width: Math.max(1, Math.round(w)), height: Math.max(1, Math.round(h)), error: "" };
+}
+
 function expandTargetSize(node) {
   const ow = Number(node.data._imgW) || 0;
   const oh = Number(node.data._imgH) || 0;
   if (!ow || !oh) return null;
   const padL = +node.data.padL || 0, padR = +node.data.padR || 0, padT = +node.data.padT || 0, padB = +node.data.padB || 0;
-  let fw = ow * (1 + padL + padR), fh = oh * (1 + padT + padB);
-  const cap = 2048, m = Math.max(fw, fh);
-  if (m > cap) { fw = (fw * cap) / m; fh = (fh * cap) / m; }
-  return { w: Math.max(1, Math.round(fw)), h: Math.max(1, Math.round(fh)) };
+  const fw = ow * (1 + padL + padR);
+  const fh = oh * (1 + padT + padB);
+  const fitted = fitExpandDimensions(fw, fh, node.data.model);
+  if (!fitted.valid) {
+    return { w: Math.max(1, Math.round(fw)), h: Math.max(1, Math.round(fh)), error: fitted.error };
+  }
+  return { w: fitted.width, h: fitted.height, error: "" };
 }
 
 function computeExpandTargetLabel(node) {
   const s = expandTargetSize(node);
-  return s ? `${s.w} × ${s.h}` : "加载中…";
+  return s ? (s.error ? "尺寸不可用" : `${s.w} × ${s.h}`) : "加载中…";
+}
+
+function updateExpandSizeFeedback(root, node) {
+  const target = expandTargetSize(node);
+  const size = root?.querySelector(".expand-size");
+  const error = root?.querySelector(".expand-size-error");
+  if (size) size.textContent = target ? (target.error ? "尺寸不可用" : `${target.w} × ${target.h}`) : "加载中…";
+  if (error) {
+    error.textContent = target?.error || "";
+    error.hidden = !target?.error;
+  }
 }
 
 // 把"原图 + 四边 pad"组成的画框按比例塞进舞台，并定位原图所在子区域
@@ -5712,13 +8141,35 @@ function setupExpandStages() {
         node.data._imgH = img.naturalHeight;
         layoutExpandStage(stage, node);
         if (changed) {
-          const ro = stage.parentElement?.querySelector(".expand-size");
-          if (ro) ro.textContent = computeExpandTargetLabel(node);
+          updateExpandSizeFeedback(stage.parentElement, node);
         }
       }
     };
     if (img.complete && img.naturalWidth > 2) onReady();
     img.addEventListener("load", onReady);
+  });
+}
+
+// 图片对比：每次渲染后读出 A 图自然尺寸，按其比例定死舞台 aspect-ratio（横屏输入 → 横屏对比框）
+function setupCompareStages() {
+  document.querySelectorAll('.node[data-type="imageCompare"] .compare-stage').forEach((stage) => {
+    const node = getNode(stage.closest(".node")?.dataset.id);
+    if (!node) return;
+    // A 图在 .compare-clip 里（B 是裸 .compare-img），取 A 作基准比例
+    const aImg = stage.querySelector(".compare-clip .compare-img");
+    if (!aImg) return;
+    const onReady = () => {
+      const w = aImg.naturalWidth, h = aImg.naturalHeight;
+      if (w > 2 && h > 2 && (node.data._imgW !== w || node.data._imgH !== h)) {
+        node.data._imgW = w;
+        node.data._imgH = h;
+        // 直接改样式，避免整页重渲染导致图片闪烁（参照 applyCompareSplit 的做法）
+        stage.style.aspectRatio = `${w} / ${h}`;
+        stage.style.minHeight = "0";
+      }
+    };
+    if (aImg.complete && aImg.naturalWidth > 2) onReady();
+    aImg.addEventListener("load", onReady);
   });
 }
 
@@ -5750,8 +8201,7 @@ function applyExpandDrag(event) {
   else if (drag.side === "bottom") node.data.padB = cp((+node.data.padB || 0) + fy);
   else node.data.padT = cp((+node.data.padT || 0) - fy);
   layoutExpandStage(stage, node);
-  const ro = stage.parentElement?.querySelector(".expand-size");
-  if (ro) ro.textContent = computeExpandTargetLabel(node);
+  updateExpandSizeFeedback(stage.parentElement, node);
 }
 
 function loadImageElement(srcUrl) {
@@ -5772,18 +8222,22 @@ async function resolveDrawableSrc(src) {
 }
 
 // 浏览器端把原图画到更大的透明画布上（用户框选的位置/大小），透明区交给上游扩图
-async function buildExpandComposite(src, pads) {
+async function buildExpandComposite(src, pads, model) {
   const drawable = await resolveDrawableSrc(src);
   if (!drawable) throw new Error("无法解析原图");
   const img = await loadImageElement(drawable);
   const ow = img.naturalWidth, oh = img.naturalHeight;
   if (!ow || !oh) throw new Error("原图尺寸无效");
-  let fw = ow * (1 + pads.padL + pads.padR), fh = oh * (1 + pads.padT + pads.padB);
-  const cap = 2048, m = Math.max(fw, fh);
-  const scale = m > cap ? cap / m : 1;
-  const outW = Math.max(1, Math.round(fw * scale)), outH = Math.max(1, Math.round(fh * scale));
+  const fw = ow * (1 + pads.padL + pads.padR);
+  const fh = oh * (1 + pads.padT + pads.padB);
+  const fitted = fitExpandDimensions(fw, fh, model);
+  if (!fitted.valid) throw new Error(fitted.error);
+  const outW = fitted.width;
+  const outH = fitted.height;
+  const scale = Math.min(outW / fw, outH / fh);
   const dw = Math.round(ow * scale), dh = Math.round(oh * scale);
-  const dx = Math.round(pads.padL * ow * scale), dy = Math.round(pads.padT * oh * scale);
+  const dx = Math.round((outW - fw * scale) / 2 + pads.padL * ow * scale);
+  const dy = Math.round((outH - fh * scale) / 2 + pads.padT * oh * scale);
   const canvas = document.createElement("canvas");
   canvas.width = outW;
   canvas.height = outH;
@@ -5809,6 +8263,7 @@ function buildExpandPrompt(userText, pads) {
 async function requestExpandImage(config, prompt, compositeDataUrl, size) {
   const model = normalizeModelValue("image", config.data.model) || getDefaultModel("image");
   const providerId = config.data.providerId || "";
+  if (isGptImage2Model(model)) window.GptImage2Sizes.assertSize(size);
   const data = await apiFetch("/api/images/generations", {
     method: "POST",
     body: JSON.stringify({ providerId, model, prompt, size, n: 1, image: [compositeDataUrl] }),
@@ -5830,7 +8285,7 @@ async function generateImageExpand(configId) {
 
   let composite, outW, outH;
   try {
-    const r = await buildExpandComposite(src, pads);
+    const r = await buildExpandComposite(src, pads, config.data.model);
     composite = r.dataUrl; outW = r.outW; outH = r.outH;
   } catch (e) { showToast(`原图处理失败：${e.message}`); return; }
   const size = `${outW}x${outH}`;
@@ -6089,8 +8544,15 @@ viewport.addEventListener("pointermove", (event) => {
     const node = getNode(drag.id);
     if (!node) return;
     const min = getMinNodeSize(node.type);
-    node.data.width = Math.round(clamp(drag.width + (event.clientX - drag.startX) / state.view.zoom, min.width, 900));
-    node.data.height = Math.round(clamp(drag.height + (event.clientY - drag.startY) / state.view.zoom, min.height, 900));
+    const width = Math.round(clamp(drag.width + (event.clientX - drag.startX) / state.view.zoom, min.width, 900));
+    const height = Math.round(clamp(drag.height + (event.clientY - drag.startY) / state.view.zoom, min.height, 900));
+    if (node.type === "layerGroup") {
+      node.data.nodeWidth = width;
+      node.data.nodeHeight = height;
+    } else {
+      node.data.width = width;
+      node.data.height = height;
+    }
     saveState();
     render();
     return;
@@ -6354,13 +8816,17 @@ document.addEventListener("paste", async (event) => {
   }
 });
 
-// 载入视频节点的预览比例跟随真实视频尺寸；loadedmetadata 不冒泡，用捕获监听兜住旧节点
+// 所有视频结果都以真实媒体尺寸校准预览比例；loadedmetadata 不冒泡，用捕获监听。
 document.addEventListener("loadedmetadata", (event) => {
   const videoEl = event.target;
   if (!(videoEl instanceof HTMLVideoElement) || !videoEl.classList.contains("result-video")) return;
-  if (!isIndexedImageSource(videoEl.dataset.assetUrl || "")) return;
-  const ratio = ratioFromDimensions(videoEl.videoWidth, videoEl.videoHeight);
   const node = getNode(videoEl.closest(".node")?.dataset.id);
+  const ratio = window.KlingProvider?.videoMetadataRatio({
+    source: videoEl.dataset.assetUrl || videoEl.currentSrc || "",
+    width: videoEl.videoWidth,
+    height: videoEl.videoHeight,
+    currentRatio: node?.data?.ratio || "",
+  }) || "";
   if (!ratio || !node || node.type !== "video" || node.data.ratio === ratio) return;
   updateNode(node.id, { ratio });
 }, true);
@@ -6368,6 +8834,18 @@ document.addEventListener("loadedmetadata", (event) => {
 document.addEventListener("contextmenu", showContextMenu);
 
 contextMenu.addEventListener("click", (event) => {
+  const favoriteButton = event.target.closest("[data-favorite-action]");
+  if (favoriteButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    const action = favoriteButton.dataset.favoriteAction;
+    const wasFavorite = contextMenuFavorites.includes(action);
+    contextMenuFavorites = contextMenuModel.toggleFavorite(contextMenuFavorites, action);
+    const saved = safeLocalStorageSet(contextMenuFavoritesStorageKey, JSON.stringify(contextMenuFavorites));
+    contextMenu.innerHTML = renderContextMenu();
+    showToast(saved ? (wasFavorite ? "已移出常用" : "已加入常用") : "常用设置保存失败");
+    return;
+  }
   const button = event.target.closest("[data-context-action]");
   if (!button) return;
   event.stopPropagation();
@@ -6423,7 +8901,19 @@ document.addEventListener("click", async (event) => {
     if (nodeAction === "generate-storyboard") generateStoryboard(id);
     if (nodeAction === "generate-template-image") generateTemplateImage(id);
     if (nodeAction === "generate-expand") generateImageExpand(id);
+    if (nodeAction === "generate-faceswap") generateFaceSwap(id);
+    if (nodeAction === "generate-style-transfer") generateStyleTransfer(id);
+    if (nodeAction === "generate-material-transfer") generateMaterialTransfer(id);
+    if (nodeAction === "generate-product-background") generateProductBackground(id);
+    if (nodeAction === "upload-product-background-product") triggerProductBackgroundUpload(id, "product");
+    if (nodeAction === "upload-product-background-background") triggerProductBackgroundUpload(id, "background");
+    if (nodeAction === "open-seedream-editor") openSeedreamAnnotationEditor(id);
+    if (nodeAction === "generate-seedream-edit") generateSeedreamEdit(id);
+    if (nodeAction === "generate-layer-separation") generateLayerSeparation(id);
+    if (nodeAction === "open-layer-editor") openLayerGroupEditor(id);
+    if (nodeAction === "layer-group-to-image") layerGroupToImage(id);
     if (nodeAction === "generate-video") generateVideo(id);
+    if (nodeAction === "resume-video-task") resumeVideoTask(id);
     if (nodeAction === "image-to-image") createImageToImage(id);
     if (nodeAction === "image-to-video") createImageToVideo(id);
     if (nodeAction === "edit-image") openImageEditor(id);
@@ -6443,6 +8933,9 @@ document.addEventListener("click", async (event) => {
     }
     if (nodeAction === "run-llm") {
       await runLlmNode(id);
+    }
+    if (nodeAction === "run-storyboard-assistant") {
+      await runStoryboardAssistantNode(id);
     }
     if (nodeAction === "run-prompt-optimizer") {
       await runPromptOptimizerNode(id);
@@ -6493,6 +8986,7 @@ document.addEventListener("click", async (event) => {
   if (action === "toggle-node-menu") nodeMenu.hidden = !nodeMenu.hidden;
   if (action === "add-text") addNode("text");
   if (action === "add-llm") addNode("llmConfig");
+  if (action === "add-storyboard-assistant") addNode("storyboardAssistant");
   if (action === "add-prompt-optimizer") addNode("promptOptimizer");
   if (action === "add-image") addNode("image");
   if (action === "add-uploaded-image") {
@@ -6507,15 +9001,23 @@ document.addEventListener("click", async (event) => {
   if (action === "add-image-config") addNode("imageConfig");
   if (action === "add-video-config") addNode("videoConfig");
   if (action === "add-storyboard-config") addNode("storyboardConfig");
+  if (action === "add-forced-perspective-poster") addImageTemplateNode("forced-perspective-poster");
   if (action === "add-template-image-config") addNode("templateImageConfig");
+  if (action === "add-style-transfer-config") addNode("styleTransferConfig");
+  if (action === "add-material-transfer-config") addNode("materialTransferConfig");
+  if (action === "add-product-background-config") addNode("productBackgroundConfig");
+  if (action === "add-face-swap-config") addNode("faceSwapConfig");
+  if (action === "add-seedream-edit") addNode("seedreamEdit");
+  if (action === "add-layer-separation") addNode("layerSeparation");
   if (action === "add-image-compare") addNode("imageCompare");
   if (action === "add-image-expand") addNode("imageExpand");
   if (action === "add-model3d") addNode("model3dPreview");
+  if (action === "add-director3d") addDirector3dNode();
   if (action === "zoom-in") setView({ ...state.view, zoom: state.view.zoom * 1.18 });
   if (action === "zoom-out") setView({ ...state.view, zoom: state.view.zoom / 1.18 });
   if (action === "fit-view") fitView();
   if (action === "theme") {
-    state.theme = state.theme === "dark" ? "light" : "dark";
+    state.theme = themeStyles.nextTheme(state.theme);
     applyTheme();
     saveState();
   }
@@ -6559,16 +9061,32 @@ document.addEventListener("error", (event) => {
 }, true);
 
 function syncNodeFieldControl(control) {
-  const field = control?.dataset?.field;
   const nodeEl = control?.closest?.(".node");
-  if (!field || !nodeEl) return false;
+  if (!nodeEl) return false;
   const node = getNode(nodeEl.dataset.id);
   if (!node) return false;
+  const klingParam = control?.dataset?.klingParam;
+  if (klingParam) {
+    if (!node.data.dynamicParams) node.data.dynamicParams = {};
+    if (!node.data.dynamicParams["kling-cli"]) node.data.dynamicParams["kling-cli"] = {};
+    if (!node.data.dynamicParams["kling-cli"][node.data.model]) node.data.dynamicParams["kling-cli"][node.data.model] = {};
+    node.data.dynamicParams["kling-cli"][node.data.model][klingParam] = control.value;
+    if (node.type === "videoConfig" && klingParam === "aspect_ratio") node.data.ratio = control.value;
+    saveState();
+    return true;
+  }
+  const field = control?.dataset?.field;
+  if (!field) return false;
   const value = control.type === "checkbox" ? control.checked : control.value;
   if (field === "model") {
     const parsed = parseModelKey(value);
     node.data.providerId = parsed.providerId;
     node.data.model = parsed.model;
+  } else if ((field === "sizeRatio" || field === "sizeTier") && isGptImage2Model(node.data.model)) {
+    const current = gptImage2PresetFromData(node.data);
+    const ratio = field === "sizeRatio" ? value : current.ratio;
+    const tier = field === "sizeTier" ? value : current.tier;
+    applyGptImage2Preset(node.data, window.GptImage2Sizes.getPreset(ratio, tier));
   } else {
     node.data[field] = value;
   }
@@ -6580,6 +9098,31 @@ function syncNodeFieldControl(control) {
     } else {
       node.data.size = getImageSizeValue(node.data.model, node.data.size);
     }
+  }
+  if (field === "model" && ["styleTransferConfig", "materialTransferConfig", "productBackgroundConfig"].includes(node.type)) {
+    if (isMjImageModel(node.data.model)) {
+      node.data.mjAr = node.data.mjAr || "1:1";
+      node.data.mjVersion = getMjVersion(node.data.model, node.data.mjVersion);
+      node.data.mjSpeed = node.data.mjSpeed || "fast";
+    } else {
+      node.data.size = getImageSizeValue(node.data.model, node.data.size);
+    }
+  }
+  if (field === "model" && node.type === "seedreamEdit") {
+    node.data.providerId = "volc";
+    node.data.model = "doubao-seedream-5-0-pro-260628";
+    node.data.size = getImageSizeValue(node.data.model, node.data.size);
+    node.data.outputFormat = node.data.outputFormat === "jpeg" ? "jpeg" : "png";
+    node.data.promptOptimization = node.data.promptOptimization === "fast" ? "fast" : "standard";
+  }
+  if (field === "model" && node.type === "layerSeparation") {
+    node.data.providerId = "volc";
+    node.data.model = "doubao-seedream-5-0-pro-260628";
+    node.data.size = ["auto", "1K", "1.5K", "2K"].includes(node.data.size) ? node.data.size : "auto";
+    node.data.promptOptimization = node.data.promptOptimization === "fast" ? "fast" : "standard";
+  }
+  if (field === "seed" && node.type === "layerSeparation") {
+    node.data.seed = Math.max(0, Math.min(2147483647, Math.trunc(Number(value) || 0)));
   }
   if (field === "model" && (node.type === "storyboardConfig" || node.type === "templateImageConfig")) {
     node.data.size = getImageSizeValue(node.data.model, node.data.size);
@@ -6596,6 +9139,10 @@ function syncNodeFieldControl(control) {
   }
   if (field === "model" && node.type === "videoConfig") {
     node.data.ratio = getVideoRatioValue(node.data);
+  }
+  if (field === "model" && isGptImage2Model(node.data.model) && ["imageConfig", "storyboardConfig", "templateImageConfig"].includes(node.type)) {
+    applyGptImage2Preset(node.data);
+    if (node.data.quality === "4K") node.data.quality = "高清画质";
   }
   saveState();
   if (field === "content") {
@@ -6621,9 +9168,15 @@ function syncNodeFieldControl(control) {
 
 function normalizeNodeModelValue(nodeType, value) {
   if (nodeType === "llmConfig") return normalizeModelValue("chat", value);
+  if (nodeType === "storyboardAssistant") return normalizeModelValue("chat", value);
   if (nodeType === "promptOptimizer") return normalizeModelValue("chat", value);
   if (nodeType === "imageConfig") return normalizeModelValue("image", value);
+  if (nodeType === "styleTransferConfig") return normalizeModelValue("image", value);
+  if (nodeType === "materialTransferConfig") return normalizeModelValue("image", value);
+  if (nodeType === "productBackgroundConfig") return normalizeModelValue("image", value);
   if (nodeType === "templateImageConfig") return normalizeModelValue("image", value);
+  if (nodeType === "seedreamEdit") return normalizeModelValue("image", value);
+  if (nodeType === "layerSeparation") return normalizeModelValue("image", value);
   if (nodeType === "videoConfig") return normalizeModelValue("video", value);
   return value;
 }
@@ -6689,6 +9242,7 @@ projectImportInput.addEventListener("change", async () => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (activeModel3dEditor) return;
   if (event.key === "Escape" && !connectionDropMenu.hidden) {
     event.preventDefault();
     hideConnectionDropMenu();
@@ -7128,13 +9682,11 @@ async function bootstrap() {
   await refreshAuthUser();
   if (currentAuthUser) {
     authOverlay.hidden = true;
+    await loadBackendStatus();
     await loadStoryboardBlacklist();
     renderTemplateLibrary();
     applyTheme();
     initializeProjectManager();
-    loadBackendStatus().finally(() => {
-      if (!appShell.hidden) render();
-    });
   } else {
     await loadStoryboardBlacklist();
     appShell.hidden = true;

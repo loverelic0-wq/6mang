@@ -489,6 +489,63 @@ ${colorLine}
 让整张图像一页高质量的儿童科普绘本：孩子第一眼被可爱角色和大场景吸引，第二眼能顺着路线读懂系统如何运行，第三眼还能继续发现细节和知识点。画面要具有系列化潜力，方便后续替换不同主题继续创作同类型图片。`;
   }
 
+  // ============ 7. 强迫透视编辑海报（2:3 竖版）============
+  function buildForcedPerspectivePosterPrompt(d, ctx) {
+    const theme = String(d.theme || "").trim();
+    const brandEvent = String(d.brandEvent || "").trim();
+    const keyword = String(d.keyword || "").trim();
+    const character = String(d.character || "").trim();
+    const prop = String(d.prop || "").trim();
+    const action = String(d.action || "").trim();
+    const typeColor = String(d.typeColor || "").trim();
+    const environment = String(d.environment || "").trim();
+    const supportInfo = String(d.supportInfo || "").trim();
+    const lighting = String(d.lighting || "").trim();
+    const extra = String(d.extra || "").trim();
+    const referenceContract = ctx && ctx.hasReference
+      ? `【参考图合同】已提供参考图。只把其中与本任务相符的人物身份、服装、品牌视觉或互动道具作为真实视觉锚点；保持可识别特征、颜色、材质和结构，不照搬无关背景，也不要额外复制参考图中的人物或物体。\n\n`
+      : "";
+
+    return `${referenceContract}请为【${brandEvent}】创作一张以【${theme}】为主题的干净、全出血编辑宣传海报。画面采用逼真的商业摄影、超大彩色无衬线字体，以及强烈但物理连贯的强迫透视。输出为 2:3 竖版海报，画面延伸到四边，不要边框、留白边或独立底栏。
+
+【本次变量】
+- 主题：${theme}
+- 品牌 / 事件：${brandEvent}
+- 主要词：${keyword}
+- 成人角色：${character}
+- 互动物品：${prop}
+- 自然动作：${action}
+- 字体颜色：${typeColor}
+- 环境：${environment}
+- 支持信息：${supportInfo || "仅保留品牌 / 事件名，不自动补写其它文字"}
+- 光线补充：${lighting || "柔和而有方向性的商业摄影光"}
+
+【镜头与强迫透视】
+使用 20–28 毫米广角镜头，人物处于中近景或全身动作构图。把同一个【${prop}】放在最靠近相机的前景，由人物亲自、自然地【${action}】。它只能因为离镜头非常近而显得夸张巨大，不能通过变形、错误比例或拼贴制造“大”。前景物体、手部、手臂、肩部和身体必须处于同一条可信的空间与动作链中。
+
+【物理连续性——最高优先级】
+- 画面中必须清楚成立：身体 → 手臂 → 手 →【${prop}】。
+- 手必须真正接触、握持、拉动、操作或使用该物体，握法与动作【${action}】一致。
+- 手指数目、关节方向、手腕角度、肘部连接、肩部连接和受力关系真实。
+- 保持【${prop}】自身结构完整、透视正确、材质真实；不要出现第二个相同物体、漂浮副本或断开的部件。
+- 人物表情、视线、重心和身体姿态要响应正在发生的动作，而不是摆拍式地把物体举向镜头。
+
+【字体与空间层级】
+在人物身后放置唯一一个超大的粗体无衬线关键词“${keyword}”，颜色为【${typeColor}】。人物躯干、连续的手臂和近镜头的【${prop}】要自然遮挡部分字母，形成“字体在后、人物在中、前景物体在最前”的三层深度。关键词即使被局部遮挡仍应可辨认。除品牌 / 事件、关键词和已提供的支持信息外，不要生成任何无意义填充文字、伪字、随机数字或复杂界面。
+
+【全出血场景】
+环境明确为【${environment}】，并从画面上方、中景一直连续延伸到底部边缘。街道、地面、车辆内部、航站楼、健身房或建筑结构必须属于同一真实空间，不能在脚部附近突然截断或换成纯色条。不要单独添加脚带、底部护带或信息色块；如有底部支持信息，直接排在真实场景上方，并控制为少量、清楚、有意义的品牌、日期、地点、类别、简短规格或行动短语。
+
+【人物与摄影质感】
+角色明确为成年人：【${character}】。人物干净、锐利、真实，身份与服装前后一致；肤色均匀，毛孔细腻，皮肤为自然哑光到缎面质感。使用${lighting || "柔和而有方向性的商业摄影光"}，让面部、手部、握持关系和前景物体都足够清晰。保留真实皮肤纹理，不要油腻高光、斑驳肤色、蜡像脸、塑料感或 CGI 皮肤。
+
+【禁止项】
+不要重复或漂浮的物体；不要断开的肢体、额外手指、错误握持、扭曲解剖；不要让人物与前景物体分离；不要让近大远小变成物体自身畸变；不要过度装饰、密集贴纸、无意义文字、复杂 UI、边框、底栏或脚部护带；不要油腻、斑驳、过度磨皮或 CGI 化的人物皮肤。
+
+【最终验收】
+第一眼看到【${keyword}】的鲜明色彩和【${prop}】冲向镜头的戏剧张力；第二眼能沿着“身体 → 手臂 → 手 → 物体”确认动作完全连贯；第三眼能读到最少量的品牌 / 事件信息。最终效果大胆、全出血、色彩鲜明、摄影真实、动作可信，适合编辑宣传与社交媒体发布。${extra ? `\n\n【额外补充】${extra}` : ""}`;
+  }
+
   window.IMAGE_TEMPLATES = {
     "brand-packaging": {
       label: "品牌包装",
@@ -554,6 +611,40 @@ ${colorLine}
       ],
       defaults: { brandName: "", industry: "", productSeries: "" },
       build: buildBoothDualViewPrompt,
+    },
+
+    "forced-perspective-poster": {
+      label: "强迫透视海报",
+      size: "1024x1536", // 2:3 竖版
+      referenceHint: "参考图 ○（可接人物、服装、品牌视觉或道具图）",
+      referenceActiveHint: "已接参考图 → 按任务匹配人物身份、服装、品牌视觉或道具结构",
+      fields: [
+        { name: "theme", label: "主题", type: "text", required: true, placeholder: "汽车 / 旅游 / 体育 / 城市 / 摄影" },
+        { name: "brandEvent", label: "品牌 / 事件", type: "text", required: true, placeholder: "品牌名、赛事名或活动名" },
+        { name: "keyword", label: "主要词", type: "text", required: true, placeholder: "一个短词，如 DRIVE / 出发" },
+        { name: "character", label: "成人角色", type: "textarea", required: true, placeholder: "角色身份、服装、神态与氛围" },
+        { name: "prop", label: "互动物品", type: "text", required: true, placeholder: "方向盘 / 行李箱 / 杠铃 / 手机 / 相机" },
+        { name: "action", label: "自然动作", type: "text", required: true, placeholder: "握住并转动 / 拉着快走 / 双手举起" },
+        { name: "typeColor", label: "字体颜色", type: "text", required: true, placeholder: "酸性青柠 / 橙色 / 朱砂红 / 紫罗兰 / 青色" },
+        { name: "environment", label: "环境", type: "text", required: true, placeholder: "汽车内饰 / 健身房 / 地铁 / 城市街道" },
+        { name: "supportInfo", label: "支持信息", type: "textarea", optional: true, placeholder: "日期、地点、类别、短规格或行动短语；不填则不自动补写" },
+        { name: "lighting", label: "光线", type: "text", optional: true, placeholder: "可留空，默认柔和定向商业摄影光" },
+        { name: "extra", label: "补充", type: "textarea", optional: true, placeholder: "可留空。例：低机位、雨后路面、品牌色只占 15%" },
+      ],
+      defaults: {
+        theme: "",
+        brandEvent: "",
+        keyword: "",
+        character: "",
+        prop: "",
+        action: "",
+        typeColor: "酸性青柠",
+        environment: "",
+        supportInfo: "",
+        lighting: "",
+        extra: "",
+      },
+      build: buildForcedPerspectivePosterPrompt,
     },
 
     "light-poster": {

@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>6mang</title>
     <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./director3d.css" />
   </head>
   <body>
     <section class="project-home" id="projectHome" aria-label="项目管理">
@@ -38,6 +39,7 @@
             <span id="projectName">AI Canvas Demo</span>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5" /></svg>
           </button>
+          <button class="ghost-button director-launch" data-action="add-director3d" title="布置场景、保存机位、预览运镜">3D 导演台</button>
         </div>
         <div class="header-center">
           <span class="status-dot"></span>
@@ -83,7 +85,7 @@
           <button class="tool-button" data-action="add-image" title="图片节点" aria-label="图片节点">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7.5A2.5 2.5 0 0 1 7.5 5h9A2.5 2.5 0 0 1 19 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 5 16.5z" /><path d="M8 15l2.5-3 2 2.2 1.2-1.4L17 16H7z" /></svg>
           </button>
-          <button class="tool-button" data-action="add-image-config" title="文生图配置" aria-label="文生图配置">
+          <button class="tool-button" data-action="add-image-config" title="图片生成" aria-label="图片生成">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2.2 4.7L19 10l-4.8 2.3L12 17l-2.2-4.7L5 10l4.8-2.3z" /><path d="M19 16l.9 1.9L22 19l-2.1 1.1L19 22l-.9-1.9L16 19l2.1-1.1z" /></svg>
           </button>
           <button class="tool-button" data-action="add-video-config" title="视频生成配置" aria-label="视频生成配置">
@@ -101,10 +103,19 @@
         <div class="node-menu" id="nodeMenu" hidden>
           <button data-action="add-text"><span class="node-menu-icon blue"></span>文本节点</button>
           <button data-action="add-llm"><span class="node-menu-icon violet"></span>LLM 文本生成</button>
+          <button data-action="add-storyboard-assistant"><span class="node-menu-icon violet"></span>分镜助手</button>
+          <button data-action="add-director3d"><span class="node-menu-icon violet"></span>3D 导演台</button>
           <button data-action="add-prompt-optimizer"><span class="node-menu-icon violet"></span>提示词优化</button>
-          <button data-action="add-image-config"><span class="node-menu-icon green"></span>文生图配置</button>
+          <button data-action="add-image-config"><span class="node-menu-icon green"></span>图片生成</button>
           <button data-action="add-storyboard-config"><span class="node-menu-icon violet"></span>故事板生成</button>
+          <button data-action="add-forced-perspective-poster"><span class="node-menu-icon green"></span>强迫透视海报</button>
           <button data-action="add-template-image-config"><span class="node-menu-icon green"></span>营销物料</button>
+          <button data-action="add-style-transfer-config"><span class="node-menu-icon purple"></span>风格迁移</button>
+          <button data-action="add-material-transfer-config"><span class="node-menu-icon purple"></span>材质迁移</button>
+          <button data-action="add-product-background-config"><span class="node-menu-icon purple"></span>产品换背景</button>
+          <button data-action="add-face-swap-config"><span class="node-menu-icon green"></span>换脸</button>
+          <button data-action="add-seedream-edit"><span class="node-menu-icon purple"></span>精确图片编辑</button>
+          <button data-action="add-layer-separation"><span class="node-menu-icon purple"></span>智能图层分离</button>
           <button data-action="add-video-config"><span class="node-menu-icon orange"></span>视频生成配置</button>
           <button data-action="add-image"><span class="node-menu-icon purple"></span>图片节点</button>
           <button data-action="add-image-compare"><span class="node-menu-icon blue"></span>图片对比</button>
@@ -143,6 +154,17 @@
     </script>
     <script type="module" src="./model-preview.js"></script>
     <script src="./image-templates.js"></script>
+    <script src="./kling-provider.js"></script>
+    <script src="./gpt-image-models.js"></script>
+    <script src="./gpt-image-2-sizes.js"></script>
+    <script src="./seedream-tools.js"></script>
+    <script src="./style-transfer.js"></script>
+    <script src="./material-transfer.js"></script>
+    <script src="./product-background.js"></script>
+    <script src="./director3d.js"></script>
+    <script src="./context-menu-model.js"></script>
+    <script src="./theme-styles.js"></script>
+    <script src="./video-polling.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

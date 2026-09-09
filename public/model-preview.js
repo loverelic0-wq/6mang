@@ -26,6 +26,7 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { GTAOPass } from "three/addons/postprocessing/GTAOPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 
 const DEFAULT_HDR_URL = "vendor/hdr/studio_1k.hdr";
 
@@ -86,6 +87,33 @@ function makeModeMaterial(mode) {
 }
 
 function makePrimitiveGeometry(kind, u) {
+  if (kind === "actor" || kind === "seatedActor") {
+    // 单一几何体保留原有零件的选中、复制、颜色与持久化协议；脚底为原点。
+    const seated = kind === "seatedActor";
+    const pieces = [];
+    const part = (geo, x, y, z, rz = 0, rx = 0) => {
+      geo.rotateZ(rz); geo.rotateX(rx); geo.translate(x, y, z);
+      pieces.push(geo.toNonIndexed()); geo.dispose();
+    };
+    const hip = seated ? 0.52 : 0.92;
+    part(new THREE.SphereGeometry(0.15, 20, 12), 0, hip + 0.69, 0);
+    part(new THREE.CylinderGeometry(0.17, 0.13, 0.48, 16), 0, hip + 0.3, 0);
+    part(new THREE.SphereGeometry(0.15, 16, 10), 0, hip, 0);
+    for (const side of [-1, 1]) {
+      part(new THREE.CylinderGeometry(0.055, 0.045, 0.53, 12), side * 0.23, hip + 0.24, 0, side * 0.12);
+      if (seated) {
+        part(new THREE.CylinderGeometry(0.08, 0.065, 0.42, 12), side * 0.1, hip, 0.21, 0, Math.PI / 2);
+        part(new THREE.CylinderGeometry(0.065, 0.045, 0.43, 12), side * 0.1, 0.28, 0.42);
+      } else {
+        part(new THREE.CylinderGeometry(0.08, 0.045, 0.8, 12), side * 0.11, 0.47, 0);
+      }
+      part(new THREE.BoxGeometry(0.12, 0.09, 0.25), side * 0.11, 0.045, seated ? 0.47 : 0.06);
+    }
+    const geometry = mergeGeometries(pieces);
+    pieces.forEach((geo) => geo.dispose());
+    geometry.scale(u, u, u);
+    return geometry;
+  }
   if (kind === "box") return new THREE.BoxGeometry(u, u, u);
   if (kind === "sphere") return new THREE.SphereGeometry(u * 0.6, 32, 16);
   if (kind === "cone") return new THREE.ConeGeometry(u * 0.5, u, 32);
@@ -95,7 +123,7 @@ function makePrimitiveGeometry(kind, u) {
   return new THREE.BoxGeometry(u, u, u);
 }
 
-const PRIMITIVE_KINDS = ["box", "sphere", "cone", "cylinder", "plane", "torus"];
+const PRIMITIVE_KINDS = ["box", "sphere", "cone", "cylinder", "plane", "torus", "actor", "seatedActor"];
 const LIGHT_KINDS = ["directional", "point", "spot"];
 const MATERIAL_CHANNELS = ["metalness", "roughness", "envMapIntensity", "emissiveIntensity", "color"];
 
@@ -207,6 +235,9 @@ function mount(container, opts = {}) {
     draggingGizmo = e.value;
     controls.enabled = !e.value;
   });
+  const notifySceneChange = () => { if (typeof opts.onChange === "function") opts.onChange(); };
+  gizmo.addEventListener("mouseUp", notifySceneChange);
+  controls.addEventListener("end", notifySceneChange);
 
   let modelRoot = null;
   let modelMaxSize = 0;
@@ -219,7 +250,7 @@ function mount(container, opts = {}) {
   const pointer = new THREE.Vector2();
 
   const activeCamera = () => (viewMode === "shot" ? shotCamera : freeCamera);
-  const sceneUnit = () => (modelMaxSize > 0 ? modelMaxSize * 0.25 : 1);
+  const sceneUnit = () => (opts.director ? 1 : modelMaxSize > 0 ? modelMaxSize * 0.25 : 1);
 
   // 地面网格
   let grid = null;
@@ -580,16 +611,23 @@ function mount(container, opts = {}) {
       const arrayBuffer = await blob.arrayBuffer();
       const root = await parseModel(String(format || "").toLowerCase(), arrayBuffer);
       if (!root) throw new Error("模型解析为空");
+      if (disposed) { disposeObject(root); return false; }
       if (modelRoot) { scene.remove(modelRoot); disposeObject(modelRoot); }
       root.updateMatrixWorld(true);
+      if (opts.director) {
+        const size = new THREE.Box3().setFromObject(root).getSize(new THREE.Vector3());
+        const extent = Math.max(size.x, size.y, size.z);
+        if (extent > 0) root.scale.multiplyScalar(2 / extent);
+        root.updateMatrixWorld(true);
+      }
       const box0 = new THREE.Box3().setFromObject(root);
       let maxS = 1;
       if (!box0.isEmpty()) {
         const c0 = box0.getCenter(new THREE.Vector3());
         const s0 = box0.getSize(new THREE.Vector3());
         maxS = Math.max(s0.x, s0.y, s0.z) || 1;
-        root.position.sub(c0);
-        groundY = -s0.y / 2;
+        root.position.sub(opts.director ? new THREE.Vector3(c0.x, box0.min.y, c0.z) : c0);
+        groundY = opts.director ? 0 : -s0.y / 2;
       }
       modelMaxSize = maxS;
       buildGrid();
@@ -611,6 +649,26 @@ function mount(container, opts = {}) {
     },
 
     getViewMode() { return viewMode; },
+    getShot() {
+      syncActiveTargetBack();
+      return { fov: shotCamera.fov, position: shotCamera.position.toArray(), target: shotTarget.toArray() };
+    },
+    setShot(shot) {
+      if (!shot || ![shot.position, shot.target].every((v) => Array.isArray(v) && v.length === 3 && v.every(Number.isFinite))) return;
+      // 先清掉 OrbitControls 的阻尼余量，避免程序运镜时叠加上一次鼠标拖动。
+      const damping = controls.enableDamping;
+      controls.enableDamping = false;
+      controls.update();
+      shotCamera.position.fromArray(shot.position);
+      shotTarget.fromArray(shot.target);
+      controller.setFov(shot.fov);
+      shotCamera.lookAt(shotTarget);
+      if (viewMode === "shot") { controls.target.copy(shotTarget); controls.update(); }
+      controls.enableDamping = damping;
+      shotCamera.updateMatrixWorld(true);
+      camHelper.update();
+    },
+    setInteractionEnabled(on) { controls.enabled = Boolean(on); gizmo.enabled = Boolean(on); },
     setViewMode(mode) {
       const next = mode === "free" ? "free" : "shot";
       syncActiveTargetBack();
@@ -689,8 +747,8 @@ function mount(container, opts = {}) {
       if (!selected || selected === modelRoot) return false;
       const obj = selected;
       deselect();
-      if (obj.parent === lightsGroup) { lightsGroup.remove(obj); disposeLightRig(obj); return true; }
-      if (obj.parent === primitivesGroup) { primitivesGroup.remove(obj); disposeObject(obj); return true; }
+      if (obj.parent === lightsGroup) { lightsGroup.remove(obj); disposeLightRig(obj); emitSelection(); notifySceneChange(); return true; }
+      if (obj.parent === primitivesGroup) { primitivesGroup.remove(obj); disposeObject(obj); emitSelection(); notifySceneChange(); return true; }
       return false;
     },
     // 复制粘贴：模型不复制（只一个）。
@@ -739,9 +797,21 @@ function mount(container, opts = {}) {
     },
     hasSelection() { return Boolean(selected); },
     getSelectionInfo() { return selectionInfo(); },
+    getSelectedTransform() {
+      if (!selected) return null;
+      return { name: selected.name, position: selected.position.toArray(), rotation: [selected.rotation.x, selected.rotation.y, selected.rotation.z].map(THREE.MathUtils.radToDeg), scale: selected.scale.toArray() };
+    },
+    setSelectedTransform(field, axis, value) {
+      if (!selected || !["position", "rotation", "scale"].includes(field) || ![0, 1, 2].includes(axis) || !Number.isFinite(Number(value))) return;
+      let v = Number(value);
+      if (field === "rotation") v = THREE.MathUtils.degToRad(v);
+      if (field === "scale") v = Math.max(0.01, Math.min(1000, v));
+      selected[field][["x", "y", "z"][axis]] = v;
+    },
+    renameSelected(name, notify = true) { if (selected) { selected.name = String(name).slice(0, 80); if (notify) emitSelection(); } },
     // Outliner：列出场景所有可选对象（模型/零件/灯），带当前选中标记。
     getObjects() {
-      const PRIM = { box: "立方体", sphere: "球体", cone: "圆锥", cylinder: "圆柱", plane: "平面", torus: "圆环" };
+      const PRIM = { box: "立方体", sphere: "球体", cone: "圆锥", cylinder: "圆柱", plane: "平面", torus: "圆环", actor: "站姿角色", seatedActor: "坐姿角色" };
       const LIGHT = { directional: "平行光", point: "点光", spot: "聚光" };
       const out = [];
       if (modelRoot) out.push({ id: modelRoot.uuid, kind: "model", label: "模型" });
@@ -749,7 +819,7 @@ function mount(container, opts = {}) {
       primitivesGroup.children.forEach((m) => {
         const k = m.userData.primKind || "box";
         pc[k] = (pc[k] || 0) + 1;
-        out.push({ id: m.uuid, kind: "primitive", label: `${PRIM[k] || k} ${pc[k]}` });
+        out.push({ id: m.uuid, kind: "primitive", label: m.name || `${PRIM[k] || k} ${pc[k]}` });
       });
       const lc = {};
       lightsGroup.children.forEach((r) => {
@@ -835,6 +905,7 @@ function mount(container, opts = {}) {
         materialOverride: { ...materialOverride },
         primitives: primitivesGroup.children.map((m) => ({
           kind: m.userData.primKind || "box",
+          name: m.name,
           position: m.position.toArray(),
           rotation: [m.rotation.x, m.rotation.y, m.rotation.z],
           scale: m.scale.toArray(),
@@ -882,6 +953,7 @@ function mount(container, opts = {}) {
         clearPrimitives();
         state.primitives.forEach((p) => {
           const mesh = createPrimitiveMesh(p.kind);
+          mesh.name = String(p.name || "").slice(0, 80);
           if (Array.isArray(p.position)) mesh.position.fromArray(p.position);
           if (Array.isArray(p.rotation)) mesh.rotation.set(p.rotation[0], p.rotation[1], p.rotation[2]);
           if (Array.isArray(p.scale)) mesh.scale.fromArray(p.scale);
@@ -907,6 +979,7 @@ function mount(container, opts = {}) {
         Object.entries(materialOverride).forEach(([ch, val]) => applyMaterialChannel(ch, val));
       }
       if (viewMode === "shot") { controls.object = shotCamera; controls.target.copy(shotTarget); }
+      shotCamera.lookAt(shotTarget);
       controls.update();
       camHelper.update();
     },
