@@ -14,6 +14,7 @@ const zoomLabel = document.querySelector("#zoomLabel");
 const saveStateLabel = document.querySelector("#saveState");
 const projectNameLabel = document.querySelector("#projectName");
 const settingsModal = document.querySelector("#settingsModal");
+const themeMenu = document.querySelector("#themeMenu");
 const contextMenu = document.createElement("div");
 contextMenu.className = "context-menu";
 contextMenu.hidden = true;
@@ -634,6 +635,7 @@ const imageAssetPrefix = "idb-image:";
 const transparentPixel = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 let imageAssetDbPromise = null;
 const imageAssetObjectUrls = new Map();
+const activeVideoReplicaTaskIds = new Set();
 const backendConfig = {
   providers: {
     chat:  { default: "default", items: {} },
@@ -685,6 +687,10 @@ function findProviderForModel(kind, modelId) {
 }
 
 function ensureNodeProvider(node) {
+  if (node.type === "videoReplicaConfig") {
+    Object.assign(node.data, window.VideoReplica.selectModel(getProviderGroup("video"), node.data));
+    return;
+  }
   const kindMap = { llmConfig: "chat", storyboardAssistant: "chat", promptOptimizer: "chat", imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", styleTransferConfig: "image", materialTransferConfig: "image", productBackgroundConfig: "image", faceSwapConfig: "image", seedreamEdit: "image", layerSeparation: "image", videoConfig: "video" };
   const kind = kindMap[node.type];
   if (!kind) return;
@@ -814,6 +820,7 @@ const nodeSizes = {
   imageConfig: { width: 300, height: 260 },
   image: { width: 260, height: 350 },
   videoConfig: { width: 300, height: 280 },
+  videoReplicaConfig: { width: 360, height: 560 },
   video: { width: 300, height: 250 },
   storyboardConfig: { width: 360, height: 520 },
   templateImageConfig: { width: 320, height: 360 },
@@ -918,12 +925,42 @@ function loadState() {
 }
 
 function normalizeState(next) {
-  const nodes = Array.isArray(next.nodes) ? next.nodes.map(migrateVideoConfigNode) : next.nodes;
-  return {
+  const nodes = Array.isArray(next.nodes) ? next.nodes.map(migrateVideoConfigNode).map(restoreVideoReplicaTaskNode) : next.nodes;
+  return migrateImageInputSlots({
     ...next,
     nodes,
     groups: Array.isArray(next.groups) ? next.groups : [],
-  };
+  });
+}
+
+function restoreVideoReplicaTaskNode(node) {
+  if (node?.type !== "video" || !node.data?.replicaPrompt || !node.data.loading || activeVideoReplicaTaskIds.has(node.id)) return node;
+  const known = Boolean(node.data.taskId);
+  return { ...node, data: { ...node.data, loading: false, replicaPending: known, replicaSubmitting: false, replicaSubmitUnknown: !known,
+    label: known ? "视频任务待查询" : "视频提交结果待确认",
+    error: known ? "已有任务，可继续查询生成结果" : "上次提交中断且未收到任务 ID，请先查看智算谷任务记录再决定是否重新提交" } };
+}
+
+function migrateImageInputSlots(workflow) {
+  const nodes = workflow.nodes || [];
+  const edges = workflow.edges || [];
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const replacements = new Map();
+  const migratedNodes = nodes.map((node) => {
+    if (node.type !== "imageConfig" || node.data?.imageInputVersion === 1) return node;
+    const refs = edges.filter((edge) => edge.target === node.id &&
+      ["image", "model3dPreview", "layerGroup"].includes(byId.get(edge.source)?.type));
+    // Old canvases did not number uncaptured 3D/uncomposited layers. Preserve
+    // every existing @image mapping, then reserve slots for those pending inputs.
+    const hadSlot = (edge) => {
+      const source = byId.get(edge.source);
+      return source.type === "image" || Boolean(source.data?.url);
+    };
+    const ordered = [...refs.filter(hadSlot), ...refs.filter((edge) => !hadSlot(edge))];
+    refs.forEach((edge, index) => replacements.set(edge, ordered[index]));
+    return { ...node, data: { ...node.data, imageInputVersion: 1 } };
+  });
+  return { ...workflow, nodes: migratedNodes, edges: edges.map((edge) => replacements.get(edge) || edge) };
 }
 
 function migrateVideoConfigNode(node) {
@@ -1843,7 +1880,7 @@ function sanitizeWorkflowState(workflow, options = {}) {
             y: Number.isFinite(Number(node.position?.y)) ? Number(node.position.y) : 80,
           },
           data: safeCloneNodeData(node.data),
-        }))
+        })).map(restoreVideoReplicaTaskNode)
     : [];
 
   if (!nodes.length && !options.allowEmpty) throw new Error("JSON 中没有可加载的节点");
@@ -1881,13 +1918,13 @@ function sanitizeWorkflowState(workflow, options = {}) {
       }
     : { x: 160, y: 120, zoom: 1 };
 
-  return {
+  return migrateImageInputSlots({
     nodes,
     edges,
     groups,
     view,
     theme: themeStyles.normalizeTheme(source.theme),
-  };
+  });
 }
 
 function loadProjectLibrary() {
@@ -2572,6 +2609,7 @@ function renderTransforms() {
 
 function renderEdges() {
   edgeLayer.innerHTML = "";
+  const inputPoints = layoutImageInputPorts();
 
   state.edges.forEach((edge) => {
     const source = getNode(edge.source);
@@ -2582,12 +2620,44 @@ function renderEdges() {
     const targetSize = getRenderedNodeSize(target);
     const sx = source.position.x + sourceSize.width + 0.5;
     const sy = source.position.y + sourceSize.height / 2;
-    const tx = target.position.x + 0.5;
-    const ty = target.position.y + targetSize.height / 2;
+    const targetPoint = inputPoints.get(edge.id);
+    const tx = targetPoint?.x ?? target.position.x + 0.5;
+    const ty = targetPoint?.y ?? target.position.y + targetSize.height / 2;
     appendInteractiveEdge(edge, sx, sy, tx, ty);
   });
 
   renderConnectionPreview();
+}
+
+// The rows can move when model controls, card size or zoom change.
+// Keep ports outside the clipped card and align them to the actual row centres.
+function layoutImageInputPorts() {
+  const points = new Map();
+  world.querySelectorAll('.node[data-type="imageConfig"]').forEach((element) => {
+    const top = element.getBoundingClientRect().top;
+    const rows = [...element.querySelectorAll(".image-input-row")];
+    element.querySelectorAll(".node-port.input").forEach((port, index) => {
+      const row = rows[index];
+      if (!row) return;
+      const rect = row.getBoundingClientRect();
+      port.style.top = `${(rect.top + rect.height / 2 - top) / state.view.zoom}px`;
+      if (port.dataset.inputEdgeId) points.set(port.dataset.inputEdgeId, getPortWorldPoint(port));
+    });
+  });
+  return points;
+}
+
+function highlightImageInput(edgeId) {
+  const edge = state.edges.find((item) => item.id === edgeId);
+  world.querySelectorAll("[data-input-edge-id]").forEach((element) => {
+    element.classList.toggle("input-highlighted", Boolean(edge && element.dataset.inputEdgeId === edge.id));
+  });
+  world.querySelectorAll(".node").forEach((element) => {
+    element.classList.toggle("input-source-highlighted", Boolean(edge && element.dataset.id === edge.source));
+  });
+  edgeLayer.querySelectorAll(".edge-link").forEach((element) => {
+    element.classList.toggle("input-highlighted", Boolean(edge && element.dataset.edgeId === edge.id));
+  });
 }
 
 function getRenderedNodeSize(node) {
@@ -2820,6 +2890,7 @@ function getMinNodeSize(type) {
 
 function renderNode(node) {
   ensureNodeProvider(node);
+  if (node.type === "imageConfig") node.data.imageInputVersion = 1;
   const wrap = document.createElement("section");
   const size = getNodeSize(node);
   wrap.className = "node";
@@ -2879,7 +2950,32 @@ function renderNode(node) {
     });
   }
 
-  wrap.append(createNodePort("input"), card, createNodePort("output"), resizeHandle);
+  wrap.append(card, createNodePort("output"), resizeHandle);
+  if (node.type === "imageConfig") {
+    card.querySelectorAll(".image-input-row").forEach((row) => {
+      const port = createNodePort("input");
+      const edgeId = row.dataset.inputEdgeId;
+      if (edgeId) {
+        port.dataset.inputEdgeId = edgeId;
+        port.title = `${row.dataset.inputLabel} · ${row.dataset.sourceLabel}（已连接）`;
+        port.setAttribute("aria-label", port.title);
+        for (const element of [row, port]) {
+          element.addEventListener("pointerenter", () => highlightImageInput(edgeId));
+          element.addEventListener("pointerleave", () => highlightImageInput(null));
+          element.addEventListener("focusin", () => highlightImageInput(edgeId));
+          element.addEventListener("focusout", () => highlightImageInput(null));
+        }
+      } else {
+        port.classList.add("input-add");
+        port.textContent = "+";
+        port.title = "拖入提示词或图片，添加一路输入";
+        port.setAttribute("aria-label", "添加输入连接点");
+      }
+      wrap.append(port);
+    });
+  } else {
+    wrap.append(createNodePort("input"));
+  }
   return wrap;
 }
 
@@ -2891,6 +2987,30 @@ function createNodePort(type) {
   button.setAttribute("aria-label", type === "input" ? "输入连接点" : "输出连接点");
   button.title = type === "input" ? "连接到这里" : "从这里连线";
   return button;
+}
+
+function renderImageGenerationInputs(node) {
+  const slots = getImageGenerationInputSlots(node.id);
+  const rows = slots.map((slot) => {
+    const sourceLabel = slot.node.data.label || slot.node.type;
+    const source = slot.kind === "image" && typeof slot.node.data.url === "string" ? slot.node.data.url : "";
+    const thumbnail = source
+      ? `<img class="image-input-thumbnail" src="${escapeHtml(imageDisplaySource(source) || transparentPixel)}" data-asset-url="${escapeHtml(source)}" alt="" referrerpolicy="no-referrer" draggable="false">`
+      : `<span class="image-input-icon" aria-hidden="true">${slot.kind === "prompt" ? "T" : "◇"}</span>`;
+    const label = slot.kind === "image"
+      ? `<button class="indicator ref-mention ${source ? "ready" : ""}" data-node-action="insert-ref-mention" data-ref-token="${escapeHtml(slot.token)}" title="将 ${escapeHtml(slot.token)} 插入提示词">${escapeHtml(slot.label)}</button>`
+      : `<span class="indicator ${slot.kind === "prompt" ? "ready" : ""}">${escapeHtml(slot.label)}</span>`;
+    return `<div class="image-input-row" data-input-edge-id="${escapeHtml(slot.edge.id)}" data-input-label="${escapeHtml(slot.label)}" data-source-label="${escapeHtml(sourceLabel)}">
+      ${label}${thumbnail}
+      <span class="image-input-source" title="${escapeHtml(sourceLabel)}">${escapeHtml(sourceLabel)}</span>
+      ${slot.kind === "image" && !source ? '<span class="image-input-pending">未就绪</span>' : ""}
+    </div>`;
+  }).join("");
+  return `<div class="image-inputs">
+    <div class="image-input-heading">输入来源<span>悬停查看连线</span></div>
+    ${rows}
+    <div class="image-input-row image-input-add-row"><span>添加输入</span><span>拖入提示词或图片</span></div>
+  </div>`;
 }
 
 function renderNodeBody(node) {
@@ -2960,15 +3080,7 @@ function renderNodeBody(node) {
   }
 
   if (node.type === "imageConfig") {
-    const prompts = incomingNodes(node.id, ["text", "llmConfig", "storyboardAssistant", "promptOptimizer"]).length;
     const refSlots = getImageReferenceSlots(node.id);
-    const refIndicators = refSlots.length
-      ? refSlots.map((ref) => `
-        <button class="indicator ready ref-mention" data-node-action="insert-ref-mention" data-ref-token="${escapeHtml(ref.token)}" title="插入到提示词">
-          ${escapeHtml(ref.token)}
-        </button>
-      `).join("")
-      : `<span class="indicator">参考图 ○</span>`;
     const model = normalizeModelValue("image", node.data.model) || getDefaultModel("image");
     const klingTool = window.KlingProvider?.toolFor("image", refSlots.length > 0) || "";
     const klingParamRows = renderKlingDynamicParams(node, "image");
@@ -2989,10 +3101,7 @@ function renderNodeBody(node) {
     return `
       <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", node.data.providerId, node.data.model, klingTool)}</select></div>
       ${paramRows}
-      <div class="node-indicators">
-        <span class="indicator ${prompts ? "ready" : ""}">提示词 ${prompts || "○"}</span>
-        ${refIndicators}
-      </div>
+      ${renderImageGenerationInputs(node)}
       <div class="node-split">
         <button class="node-button" data-node-action="generate-image">生成图片</button>
         <button class="node-secondary-button" data-node-action="replace-image">重新生成</button>
@@ -3207,6 +3316,8 @@ function renderNodeBody(node) {
          </div>`;
     return `${preview}${meta}${toolbar}`;
   }
+
+  if (node.type === "videoReplicaConfig") return renderVideoReplicaNode(node);
 
   if (node.type === "videoConfig") {
     const prompt = incomingNodes(node.id, ["text", "llmConfig", "storyboardAssistant", "promptOptimizer"]).length;
@@ -4638,7 +4749,7 @@ function blobToDataUrl(blob) {
 }
 
 function hydrateAssetImages() {
-  document.querySelectorAll(".generated-image[data-asset-url], .product-background-slot img[data-asset-url], video.result-video[data-asset-url]").forEach((el) => {
+  document.querySelectorAll(".generated-image[data-asset-url], .image-input-thumbnail[data-asset-url], .product-background-slot img[data-asset-url], .replica-slot [data-asset-url], video.result-video[data-asset-url]").forEach((el) => {
     const assetId = getIndexedImageId(el.dataset.assetUrl);
     if (!assetId || el.dataset.assetLoading === "1") return;
     if (imageAssetObjectUrls.has(assetId)) {
@@ -4711,9 +4822,46 @@ function getReferenceMaterialSlots(targetId) {
 
 // 仅图片槽位（文生图 / MJ / 图生图用）：从素材槽位里挑出图片并重新连续编号。
 function getImageReferenceSlots(targetId) {
+  // Reserve image-generation slots even before a 3D capture or layer composite
+  // is ready, so completing that input cannot renumber the other references.
+  if (getNode(targetId)?.type === "imageConfig") {
+    return state.edges
+      .filter((edge) => edge.target === targetId)
+      .map((edge) => ({ edge, node: getNode(edge.source) }))
+      .filter(({ node }) => ["image", "layerGroup", "model3dPreview"].includes(node?.type))
+      .map((slot, index) => ({ ...slot, kind: "image", number: index + 1, token: `@图片${index + 1}` }));
+  }
   return getReferenceMaterialSlots(targetId)
     .filter((slot) => slot.kind === "image")
     .map((slot, index) => ({ ...slot, number: index + 1, token: `@图片${index + 1}` }));
+}
+
+function getImageGenerationInputSlots(targetId) {
+  const inputs = state.edges
+    .filter((edge) => edge.target === targetId)
+    .map((edge) => ({ edge, node: getNode(edge.source) }))
+    .filter(({ node }) => node);
+  const prompts = inputs
+    .filter(({ node }) => ["text", "llmConfig", "storyboardAssistant", "promptOptimizer"].includes(node.type))
+    .map((slot, index) => ({ ...slot, kind: "prompt", token: "", label: `提示词 ${index + 1}` }));
+  const images = getImageReferenceSlots(targetId).map((slot) => ({ ...slot, label: slot.token }));
+  const used = new Set([...prompts, ...images].map((slot) => slot.edge.id));
+  const others = inputs.filter(({ edge }) => !used.has(edge.id))
+    .map((slot) => ({ ...slot, kind: "other", token: "", label: "未使用" }));
+  return [...prompts, ...images, ...others];
+}
+
+async function resolveImageReferenceSlots(slots) {
+  return Promise.all(slots.map(async (slot) => {
+    let source;
+    try {
+      source = await resolveImageForApi(slot.node.data.url);
+    } catch {
+      throw new Error(`${slot.token} 读取失败，请重新载入这张图片后再生成`);
+    }
+    if (!source) throw new Error(`${slot.token} 未就绪，请先载入图片、保存 3D 取景或合成图层`);
+    return source;
+  }));
 }
 
 function getTextMentionOptions(textNodeId) {
@@ -4840,6 +4988,7 @@ function addNode(type, position = getViewportCenter(), data = {}) {
     },
     imageConfig: {
       label: "图片生成",
+      imageInputVersion: 1,
       model: getDefaultModel("image"),
       quality: "标准画质",
       size: getImageSizeValue(getDefaultModel("image"), "2048x2048"),
@@ -4915,6 +5064,7 @@ function addNode(type, position = getViewportCenter(), data = {}) {
     },
     model3dPreview: { label: "3D 模型预览", url: false, modelAssetId: "", modelName: "", modelFormat: "", renderMode: "clay", view: null },
     videoConfig: { label: "视频生成", model: getDefaultModel("video"), videoMode: "reference", ratio: "16:9", resolution: "720p", seconds: 8 },
+    videoReplicaConfig: { label: "爆款视频复刻", ...window.VideoReplica.selectModel(getProviderGroup("video")), replacementMode: "person", targetPerson: "", extra: "", resolution: "720p", videoMode: "reference" },
     video: { label: "视频节点", url: false },
     storyboardConfig: {
       label: "故事板生成",
@@ -5722,7 +5872,7 @@ async function generateImage(configId) {
     return;
   }
   const prompt = normalizePromptReferenceMentions(getNodePrompt(configId) || "高质量 AI 生成图片");
-  const refImageNodes = getImageReferenceSlots(configId).map((ref) => ref.node);
+  const refSlots = getImageReferenceSlots(configId);
   const existing = findOutputImageNode(configId);
 
   let imageId = existing?.id || null;
@@ -5746,7 +5896,7 @@ async function generateImage(configId) {
   }
 
   try {
-    const refImages = (await Promise.all(refImageNodes.map((node) => resolveImageForApi(node.data.url)))).filter(Boolean);
+    const refImages = await resolveImageReferenceSlots(refSlots);
     const url = isMjImageModel(config.data.model)
       ? await requestMjImageGeneration(config, prompt, refImages)
       : await requestImageGeneration(config, prompt, refImages);
@@ -6860,7 +7010,7 @@ function startConnection(sourceId, sourcePort) {
   sourcePort?.classList.add("active");
   document.querySelectorAll(".node-port.input").forEach((item) => {
     const nodeId = item.closest(".node")?.dataset.id;
-    if (nodeId && nodeId !== sourceId) item.classList.add("connect-target");
+    if (nodeId && nodeId !== sourceId && !item.dataset.inputEdgeId) item.classList.add("connect-target");
   });
   viewport.classList.add("connecting");
   renderEdges();
@@ -6877,8 +7027,13 @@ function clearPendingConnection() {
   renderEdges();
 }
 
-function finishConnection(targetId) {
+function finishConnection(targetId, targetPort = null) {
   if (!pendingConnection) return false;
+  if (targetPort?.dataset.inputEdgeId) {
+    clearPendingConnection();
+    showToast("这一路输入已连接，请拖到「添加输入」连接新节点");
+    return false;
+  }
   const sourceId = pendingConnection;
   const connection = inferConnection(sourceId, targetId);
   clearPendingConnection();
@@ -6890,6 +7045,9 @@ function finishConnection(targetId) {
 function inferConnection(sourceId, targetId) {
   const source = getNode(sourceId);
   const target = getNode(targetId);
+  if (source?.type === "videoReplicaConfig" && target?.type === "video") return { type: "output", label: "复刻结果" };
+  if (target?.type === "videoReplicaConfig" && source?.type === "image") return { type: "imageOrder", label: "人物参考图" };
+  if (target?.type === "videoReplicaConfig" && source?.type === "video") return { type: "default", label: "原视频" };
   if (source?.type === "imageConfig" && target?.type === "image") return { type: "output", label: "输出" };
   if (source?.type === "videoConfig" && target?.type === "video") return { type: "output", label: "输出" };
   if (source?.type === "storyboardConfig" && target?.type === "image") return { type: "output", label: "故事板" };
@@ -6964,6 +7122,7 @@ const connectionDropTargets = {
     { type: "videoConfig", label: "+ 文生视频" },
   ],
   image: [
+    { type: "videoReplicaConfig", label: "+ 爆款视频复刻(用作人物图)" },
     { type: "imageConfig", label: "+ 图片生成(用作参考图)" },
     { type: "styleTransferConfig", label: "+ 风格迁移(用作内容图)" },
     { type: "productBackgroundConfig", label: "+ 产品换背景(用作产品图)" },
@@ -7010,6 +7169,12 @@ const connectionDropTargets = {
   ],
   videoConfig: [
     { type: "video", label: "+ 视频结果" },
+  ],
+  video: [
+    { type: "videoReplicaConfig", label: "+ 爆款视频复刻(用作原视频)" },
+  ],
+  videoReplicaConfig: [
+    { type: "video", label: "+ 复刻结果" },
   ],
   storyboardConfig: [
     { type: "image", label: "+ 故事板图像" },
@@ -7140,6 +7305,10 @@ async function refreshNode(id) {
     }
     return;
   }
+  if (node.type === "videoReplicaConfig") {
+    generateVideoReplica(id);
+    return;
+  }
   if (node.type === "videoConfig") {
     generateVideo(id);
     return;
@@ -7171,6 +7340,8 @@ async function refreshNode(id) {
     return;
   }
   if (node.type === "video") {
+    const replica = incomingNodes(id, ["videoReplicaConfig"])[0];
+    if (replica) { generateVideoReplica(replica.id); return; }
     const config = incomingNodes(id, ["videoConfig"])[0];
     if (config) generateVideo(config.id);
     else showToast("视频节点没有上游生成配置");
@@ -7300,6 +7471,209 @@ function updateConnectionPreview(clientX, clientY) {
   renderEdges();
 }
 
+const activeVideoReplicaRuns = new Set();
+
+function getVideoReplicaSlots(configId) {
+  return state.edges.filter((edge) => edge.target === configId).map((edge) => ({ edge, node: getNode(edge.source) }));
+}
+
+function renderVideoReplicaNode(node) {
+  const slots = getVideoReplicaSlots(node.id);
+  const { character, video } = window.VideoReplica.assignInputs(slots);
+  const models = window.VideoReplica.availableModels(getProviderGroup("video"));
+  const selected = models.find((item) => item.providerId === node.data.providerId && item.model === node.data.model);
+  const busy = activeVideoReplicaRuns.has(node.id);
+  const output = findOutputVideoNode(node.id);
+  const pending = Boolean(output?.data?.replicaPending && !output.data.url);
+  let inputError = "";
+  try { window.VideoReplica.validateInputs(slots); } catch (error) { inputError = error.message; }
+  const renderSlot = (slot, role, label, hint) => {
+    const source = slot?.node?.data?.url;
+    const ready = typeof source === "string" && source && !slot.node.data.loading;
+    const src = ready ? (role === "video" ? (getIndexedImageId(source) ? imageDisplaySource(source) : source) : imageDisplaySource(source)) : "";
+    return `<button class="replica-slot ${ready ? "ready" : ""}" data-node-action="upload-replica-${role}" ${busy ? "disabled" : ""} title="上传或替换${label}">
+      ${ready ? (role === "video" ? `<video muted playsinline preload="metadata" src="${escapeHtml(src)}" data-asset-url="${escapeHtml(source)}"></video>` : `<img src="${escapeHtml(src)}" data-asset-url="${escapeHtml(source)}" alt="人物参考图">`) : '<span class="replica-slot-icon">＋</span>'}
+      <strong>${label}${ready ? " ✓" : ""}</strong><small>${hint}</small>
+    </button>`;
+  };
+  const duration = video?.node?.data?.replicaMetadata?.duration;
+  const durationText = duration ? `${Number(duration).toFixed(1)} 秒 → ${Math.max(4, Math.ceil(duration))} 秒` : "自动读取原视频时长";
+  return `
+    <div class="replica-intro"><span>原片动作与镜头 · 换成你的人物</span><span class="replica-badge">SD 2.0</span></div>
+    <div class="replica-slots">${renderSlot(video, "video", "① 原视频", "动作、口型、镜头")}${renderSlot(character, "character", "② 人物参考图", "肖像 / 人物三视图")}</div>
+    <fieldset class="replica-settings" ${busy ? "disabled" : ""}>
+      <div class="node-row"><span>模型</span><select data-field="model">${models.length ? models.map((item) => `<option value="${escapeHtml(makeModelKey(item.providerId, item.model))}" ${item === selected ? "selected" : ""}>${escapeHtml(`${item.providerLabel} · ${item.label}`)}</option>`).join("") : '<option value="">请配置智算谷 SD2.0</option>'}</select></div>
+      <div class="node-row"><span>替换范围</span><select data-field="replacementMode">${optionPairs([["person", "人物形象（脸、发型、服装）"], ["face", "脸与发型（保留原片服装）"]], node.data.replacementMode || "person")}</select></div>
+      <div class="node-row"><span>替换谁</span><input data-field="targetPerson" type="text" value="${escapeHtml(node.data.targetPerson || "")}" placeholder="单人可留空；多人例：左侧白衣女性"></div>
+      <div class="node-row"><span>输出</span><b>720p · 自动匹配原片画幅</b></div>
+      <div class="node-row"><span>时长</span><span>${escapeHtml(durationText)}</span></div>
+      <div class="node-row node-row-col"><span>补充要求</span><textarea data-field="extra" placeholder="可留空。例：保留手中的产品与桌面陈设">${escapeHtml(node.data.extra || "")}</textarea></div>
+    </fieldset>
+    <div class="replica-locks"><span>动作 / 表情 / 口型</span><span>产品 / 背景 / 运镜</span><span>光影融合</span></div>
+    <div class="node-tip">参考视频 2–15 秒；输出按整秒向上取整，最短 4 秒。音频、字幕与画面尽量保持，结果需对照原片检查。</div>
+    ${!selected?.configured ? '<div class="node-inline-error">先在 API 设置中配置智算谷 SD2.0 多模态视频模型。</div>' : ""}
+    ${inputError ? `<div class="node-tip">${escapeHtml(inputError)}</div>` : ""}
+    ${node.data.error ? `<div class="node-inline-error">${escapeHtml(node.data.error)}</div>` : ""}
+    <button class="node-secondary-button" data-node-action="preview-replica-prompt">查看复刻指令</button>
+    <button class="node-button" data-node-action="generate-video-replica" ${busy || (!pending && (inputError || !selected?.configured)) ? "disabled" : ""}>${busy ? "正在复刻…" : pending ? "继续查询已有任务" : output?.data?.replicaSubmitUnknown ? "确认后重新提交" : "开始复刻"}</button>`;
+}
+
+function previewVideoReplicaPrompt(configId) {
+  const config = getNode(configId);
+  if (!config) return;
+  const dialog = document.createElement("dialog");
+  dialog.className = "replica-prompt-dialog";
+  dialog.innerHTML = `<strong>复刻指令</strong><pre>${escapeHtml(window.VideoReplica.buildPrompt(config.data))}</pre><button class="node-button">关闭</button>`;
+  dialog.querySelector("button").onclick = () => dialog.close();
+  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  document.body.appendChild(dialog);
+  dialog.showModal();
+}
+
+async function probeVideoReplicaMetadata(source) {
+  const assetId = getIndexedImageId(source);
+  const src = assetId ? await loadImageAssetObjectUrl(assetId) : source;
+  if (!src) throw new Error("原视频读取失败，请重新上传");
+  return new Promise((resolve, reject) => {
+    const probe = document.createElement("video");
+    probe.preload = "metadata";
+    probe.muted = true;
+    const cleanup = () => {
+      clearTimeout(timer);
+      probe.onloadedmetadata = probe.onerror = null;
+      probe.removeAttribute("src");
+      probe.load();
+    };
+    const timer = setTimeout(() => { cleanup(); reject(new Error("读取原视频超时，请下载后重新上传")); }, 20000);
+    probe.onloadedmetadata = () => {
+      try {
+        const metadata = window.VideoReplica.validateMetadata({ duration: probe.duration, width: probe.videoWidth, height: probe.videoHeight });
+        cleanup(); resolve(metadata);
+      } catch (error) { cleanup(); reject(error); }
+    };
+    probe.onerror = () => { cleanup(); reject(new Error("无法读取原视频，请上传可播放的 MP4 或 MOV 文件")); };
+    probe.src = src;
+  });
+}
+
+async function triggerVideoReplicaUpload(configId, role) {
+  if (activeVideoReplicaRuns.has(configId)) return;
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = role === "video" ? "video/mp4,video/quicktime,.mp4,.mov" : "image/png,image/jpeg,image/webp";
+  input.addEventListener("change", async () => {
+    const file = input.files?.[0];
+    const config = getNode(configId);
+    if (!file || !config || activeVideoReplicaRuns.has(configId)) return;
+    let temporaryUrl = "";
+    try {
+      const isVideo = role === "video";
+      if (!file.type.startsWith(isVideo ? "video/" : "image/")) throw new Error(isVideo ? "请选择视频文件" : "请选择人物图片");
+      if (file.size > (isVideo ? 50 : 30) * 1024 * 1024) throw new Error(isVideo ? "参考视频不能超过 50MB，请先压缩" : "人物图片不能超过 30MB");
+      let metadata;
+      if (isVideo) {
+        temporaryUrl = URL.createObjectURL(file);
+        metadata = await probeVideoReplicaMetadata(temporaryUrl);
+      }
+      const url = await (isVideo ? persistVideoBlob(file) : persistImageBlob(file));
+      if (!getNode(configId) || activeVideoReplicaRuns.has(configId)) return;
+      const assigned = window.VideoReplica.assignInputs(getVideoReplicaSlots(configId));
+      if (assigned[role]) removeEdge(assigned[role].edge.id);
+      const label = isVideo ? "原视频" : "人物参考图";
+      const id = addNode(isVideo ? "video" : "image", { x: config.position.x - 360, y: config.position.y + (isVideo ? 0 : 310) }, {
+        label, url, ...(metadata ? { replicaMetadata: metadata, ratio: ratioFromDimensions(metadata.width, metadata.height) } : {}),
+      });
+      addEdge(id, configId, isVideo ? "default" : "imageOrder", { label });
+      updateNode(configId, { error: "" });
+      showToast(metadata?.warning || `已载入${label}`);
+    } catch (error) { showToast(error.message); }
+    finally { if (temporaryUrl) URL.revokeObjectURL(temporaryUrl); }
+  });
+  input.click();
+}
+
+async function resolveVideoReplicaMedia(source, kind) {
+  const assetId = getIndexedImageId(source);
+  let blob;
+  if (assetId) {
+    blob = (await getImageAsset(assetId))?.blob;
+    if (!blob) throw new Error("本地素材已失效，请重新上传");
+  } else if (/^(blob:|\/)/.test(source) || new URL(source, location.href).origin === location.origin) {
+    const response = await fetch(source);
+    if (!response.ok) throw new Error("本地素材读取失败，请重新上传");
+    blob = await response.blob();
+  }
+  if (blob) {
+    if (!blob.type.startsWith(`${kind}/`)) throw new Error("素材类型不匹配，请重新上传对应的图片或视频");
+    if (blob.size > (kind === "video" ? 50 : 30) * 1024 * 1024) throw new Error(kind === "video" ? "参考视频不能超过 50MB，请先压缩" : "人物图片不能超过 30MB");
+    return blobToDataUrl(blob);
+  }
+  return resolveImageForApi(source);
+}
+
+async function generateVideoReplica(configId) {
+  const config = getNode(configId);
+  if (!config || config.type !== "videoReplicaConfig" || activeVideoReplicaRuns.has(configId)) return;
+  const existing = findOutputVideoNode(configId);
+  if (existing?.data?.loading) { showToast("已有视频任务在生成，请勿重复提交"); return; }
+  if (existing?.data?.replicaPending && existing.data.taskId && !existing.data.url) { await resumeVideoTask(existing.id); return; }
+  if (existing?.data?.replicaSubmitUnknown && !window.confirm("上次提交未收到任务 ID，可能已在智算谷生成。请先查看智算谷任务记录；重新提交可能再次计费。确定重新提交？")) return;
+  let videoId = null;
+  let submitted = false;
+  activeVideoReplicaRuns.add(configId);
+  try {
+    const inputs = window.VideoReplica.validateInputs(getVideoReplicaSlots(configId));
+    const settings = { ...config.data };
+    const selected = window.VideoReplica.availableModels(getProviderGroup("video")).find((item) => item.providerId === settings.providerId && item.model === settings.model);
+    if (!selected?.configured) throw new Error("请先配置并选择智算谷 SD2.0 多模态视频模型");
+    const sources = [inputs.character.node.data.url, inputs.video.node.data.url];
+    updateNode(configId, { error: "" });
+    render();
+    showProcessing("正在读取原视频并准备人物参考图...");
+    const metadata = await probeVideoReplicaMetadata(sources[1]);
+    if (getNode(inputs.video.node.id)?.data.url === sources[1]) updateNode(inputs.video.node.id, { replicaMetadata: metadata });
+    const [character, video] = await Promise.all([resolveVideoReplicaMedia(sources[0], "image"), resolveVideoReplicaMedia(sources[1], "video")]);
+    if (!character || !video) throw new Error("素材读取失败，请重新载入原视频和人物参考图");
+    const prompt = window.VideoReplica.buildPrompt(settings);
+    const ratio = nearestByAspect(videoAspectOptions.filter((value) => value !== "adaptive"), metadata.width / metadata.height);
+    const body = JSON.stringify({ workflow: "video-replica", providerId: settings.providerId, model: settings.model,
+      prompt, images: [character], videos: [video], videoMode: "reference", ratio, seconds: metadata.seconds,
+      resolution: "720p", generateAudio: true, realPersonMode: true, conversionSlots: ["all"] });
+    if (new Blob([body]).size > 63 * 1024 * 1024) throw new Error("本地素材编码后超过上传上限，请压缩原视频和人物图片后重试");
+    if (!getNode(configId)) return;
+    const currentOutput = existing ? getNode(existing.id)?.data : null;
+    if (existing && (currentOutput?.loading || activeVideoReplicaTaskIds.has(existing.id) || currentOutput?.taskId !== existing.data.taskId || currentOutput?.url !== existing.data.url)) throw new Error("该结果节点已被另一任务使用，请连接独立的视频结果节点");
+    videoId = existing?.id;
+    const outputData = { label: "视频复刻中...", loading: true, url: false, error: "", taskId: "", replicaPending: false,
+      model: settings.model, providerId: settings.providerId, ratio, replicaPrompt: prompt, replicaSubmitting: true, replicaSubmitUnknown: false };
+    if (videoId && getNode(videoId)) updateNode(videoId, outputData);
+    else {
+      videoId = addNode("video", { x: config.position.x + 440, y: config.position.y }, outputData);
+      addEdge(configId, videoId, "output", { label: "复刻结果" });
+    }
+    activeVideoReplicaTaskIds.add(videoId);
+    submitted = true;
+    const created = await apiFetch("/api/video/create", { method: "POST", body });
+    if (!created?.id) throw new Error("智算谷接口未返回任务 ID");
+    updateNode(videoId, { taskId: created.id, replicaPending: true, replicaSubmitting: false });
+    await pollVideoTask(videoId, created.id, settings.providerId);
+    if (getNode(configId)) updateNode(configId, { executed: true, error: "" });
+    hideProcessing("视频复刻完成，请对照原片检查人物、音频和字幕");
+  } catch (error) {
+    if (videoId) {
+      handleVideoPollingError(videoId, error);
+      const unknown = submitted && !getNode(videoId)?.data.taskId && (!error.status || error.status >= 500);
+      updateNode(videoId, { replicaSubmitting: false, replicaSubmitUnknown: unknown,
+        ...(unknown ? { label: "视频提交结果待确认", error: "未收到任务 ID，请先查看智算谷任务记录，避免重复提交。" } : {}) });
+    }
+    else { if (getNode(configId)) updateNode(configId, { error: error.message }); processing.hidden = true; showToast(error.message); }
+  } finally {
+    if (videoId) activeVideoReplicaTaskIds.delete(videoId);
+    activeVideoReplicaRuns.delete(configId);
+    render();
+  }
+}
+
 async function generateVideo(configId) {
   const config = getNode(configId);
   if (!config) return;
@@ -7370,11 +7744,13 @@ function videoProviderForPolling(providerId = "") {
 }
 
 function handleVideoPollingError(videoId, error) {
-  const pending = Boolean(error?.pollingPending);
+  const replica = getNode(videoId)?.data;
+  const pending = Boolean(error?.pollingPending || (replica?.replicaPrompt && replica.taskId && !error?.videoTaskFailed));
   updateNode(videoId, {
     label: pending ? "视频仍在生成" : "生成失败",
     loading: false,
     error: error.message,
+    ...(getNode(videoId)?.data.replicaPrompt ? { replicaPending: pending } : {}),
   });
   processing.hidden = true;
   showToast(`${pending ? "视频任务仍在生成" : "视频生成失败"}：${error.message}`);
@@ -7382,21 +7758,26 @@ function handleVideoPollingError(videoId, error) {
 
 async function resumeVideoTask(videoId) {
   const videoNode = getNode(videoId);
+  if (videoNode?.data?.loading) { showToast("正在查询该任务，请稍候"); return; }
   const taskId = String(videoNode?.data?.taskId || "");
   if (!taskId) {
     showToast("该视频节点没有可查询的任务 ID");
     return;
   }
   const providerId = videoNode.data.providerId || "";
+  if (videoNode.data.replicaPrompt) activeVideoReplicaTaskIds.add(videoId);
   updateNode(videoId, { label: "视频生成中...", loading: true, error: "" });
   showProcessing("正在继续查询已有视频任务...");
   try {
     await pollVideoTask(videoId, taskId, providerId);
-    const config = incomingNodes(videoId, ["videoConfig"])[0];
+    const config = incomingNodes(videoId, ["videoConfig", "videoReplicaConfig"])[0];
     if (config) updateNode(config.id, { executed: true });
     hideProcessing("视频任务已完成");
   } catch (error) {
     handleVideoPollingError(videoId, error);
+  } finally {
+    if (videoNode.data.replicaPrompt) activeVideoReplicaTaskIds.delete(videoId);
+    render();
   }
 }
 
@@ -7427,15 +7808,17 @@ async function pollVideoTask(videoId, taskId, providerId = "") {
       break;
     }
     if (result?.video_url) {
-      updateNode(videoId, { label: "视频生成结果", loading: false, url: result.video_url, taskId, gradient: generateGradient(taskId), error: "" });
+      updateNode(videoId, { label: getNode(videoId)?.data.replicaPrompt ? "视频复刻结果" : "视频生成结果", loading: false, url: result.video_url, taskId, gradient: generateGradient(taskId), error: "", replicaPending: false });
       const videoNode = getNode(videoId);
-      const saved = await recordProjectHistory({ type: "video", url: result.video_url, prompt: "", model: videoNode?.data?.model || "" });
+      const saved = await recordProjectHistory({ type: "video", url: result.video_url, prompt: videoNode?.data?.replicaPrompt || "", model: videoNode?.data?.model || "" });
       // 上游视频链接会过期；落盘成功后切到持久的本地回流地址，刷新画布后仍可播放。
       if (saved?.fileUrl && getNode(videoId)) updateNode(videoId, { url: saved.fileUrl });
       return;
     }
     if (["failed", "error", "canceled", "cancelled"].includes(String(result?.status || "").toLowerCase())) {
-      throw new Error(result?.error || `任务状态：${result.status}`);
+      const error = new Error(result?.error || `任务状态：${result.status}`);
+      error.videoTaskFailed = true;
+      throw error;
     }
     if (attempt < maxAttempts - 1) {
       await new Promise((resolve) => setTimeout(resolve, policy.intervalMs));
@@ -7856,6 +8239,7 @@ function handleContextAction(action) {
     "add-prompt-optimizer": "promptOptimizer",
     "add-image-config": "imageConfig",
     "add-video-config": "videoConfig",
+    "add-video-replica": "videoReplicaConfig",
     "add-storyboard-config": "storyboardConfig",
     "add-template-image-config": "templateImageConfig",
     "add-style-transfer-config": "styleTransferConfig",
@@ -7886,15 +8270,44 @@ function handleContextAction(action) {
 function applyTheme() {
   const theme = themeStyles.presentation(state.theme);
   state.theme = theme.state;
-  document.body.classList.toggle("dark", theme.state === "dark");
+  document.body.classList.toggle("dark", theme.isDark);
   document.body.dataset.theme = theme.id;
   const themeButton = document.querySelector("[data-action='theme']");
   if (!themeButton) return;
-  themeButton.title = `当前：${theme.label}；切换到${theme.nextLabel}`;
-  themeButton.setAttribute("aria-label", `切换到${theme.nextLabel}`);
-  themeButton.innerHTML = theme.state === "dark"
-    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>'
-    : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a7 7 0 1 0 9 9 5.5 5.5 0 0 1-9-9z"/></svg>';
+  themeButton.title = `画布皮肤：${theme.label}`;
+  themeButton.setAttribute("aria-label", `选择画布皮肤，当前为${theme.label}`);
+  themeButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="11" height="11" rx="2"/><path d="M9 9h11v11H9z"/></svg>';
+  renderThemeMenu(theme.state);
+}
+
+function renderThemeMenu(activeTheme = state.theme) {
+  if (!themeMenu) return;
+  const descriptions = {
+    light: "暖色纸张、砖红强调",
+    dark: "低眩光石墨、柔蓝强调",
+    tactical: "深青黑、翡翠绿、战术网格",
+    rift: "深海蓝、旧金边框、符文星辉",
+  };
+  themeMenu.innerHTML = `
+    <div class="theme-menu-heading">
+      <strong>画布皮肤</strong>
+      <span>仅改变视觉样式</span>
+    </div>
+    ${themeStyles.presets().map((preset) => {
+      const selected = preset.state === activeTheme;
+      return `<button type="button" class="theme-option ${selected ? "active" : ""}" data-theme-option="${escapeHtml(preset.state)}" role="menuitemradio" aria-checked="${selected ? "true" : "false"}">
+        <span class="theme-swatch ${escapeHtml(preset.id)}" aria-hidden="true"><i></i></span>
+        <span class="theme-option-copy"><strong>${escapeHtml(preset.label)}</strong><small>${escapeHtml(descriptions[preset.state] || "")}</small></span>
+        <span class="theme-option-check" aria-hidden="true">${selected ? "✓" : ""}</span>
+      </button>`;
+    }).join("")}
+  `;
+}
+
+function setThemeMenuOpen(open) {
+  if (!themeMenu) return;
+  themeMenu.hidden = !open;
+  document.querySelector("[data-action='theme']")?.setAttribute("aria-expanded", open ? "true" : "false");
 }
 
 function screenToWorld(clientX, clientY) {
@@ -8672,7 +9085,7 @@ document.addEventListener("pointerup", (event) => {
   try { viewport.releasePointerCapture(event.pointerId); } catch {}
 
   if (targetId) {
-    finishConnection(targetId);
+    finishConnection(targetId, target);
     return;
   }
 
@@ -8863,7 +9276,12 @@ document.addEventListener("pointerdown", (event) => {
   if (event.button !== 0) return;
   if (!contextMenu.hidden && !contextMenu.contains(event.target)) hideContextMenu();
   if (!connectionDropMenu.hidden && !connectionDropMenu.contains(event.target)) hideConnectionDropMenu();
+  if (themeMenu && !themeMenu.hidden && !event.target.closest(".theme-picker")) setThemeMenuOpen(false);
 }, true);
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && themeMenu && !themeMenu.hidden) setThemeMenuOpen(false);
+});
 
 document.addEventListener("click", async (event) => {
   const port = event.target.closest(".node-port");
@@ -8873,7 +9291,7 @@ document.addEventListener("click", async (event) => {
     if (port.dataset.port === "output") {
       startConnection(nodeId, port);
     } else if (pendingConnection) {
-      finishConnection(nodeId);
+      finishConnection(nodeId, port);
     }
     return;
   }
@@ -8884,6 +9302,15 @@ document.addEventListener("click", async (event) => {
 
   const action = event.target.closest("[data-action]")?.dataset.action;
   const nodeAction = event.target.closest("[data-node-action]")?.dataset.nodeAction;
+  const themeOption = event.target.closest("[data-theme-option]");
+  if (themeOption) {
+    state.theme = themeStyles.normalizeTheme(themeOption.dataset.themeOption);
+    applyTheme();
+    saveState();
+    setThemeMenuOpen(false);
+    showToast(`已切换为${themeStyles.presentation(state.theme).label}`);
+    return;
+  }
   const mentionButton = event.target.closest("[data-mention-token]");
   if (mentionButton) {
     event.preventDefault();
@@ -8913,6 +9340,10 @@ document.addEventListener("click", async (event) => {
     if (nodeAction === "open-layer-editor") openLayerGroupEditor(id);
     if (nodeAction === "layer-group-to-image") layerGroupToImage(id);
     if (nodeAction === "generate-video") generateVideo(id);
+    if (nodeAction === "generate-video-replica") generateVideoReplica(id);
+    if (nodeAction === "upload-replica-video") triggerVideoReplicaUpload(id, "video");
+    if (nodeAction === "upload-replica-character") triggerVideoReplicaUpload(id, "character");
+    if (nodeAction === "preview-replica-prompt") previewVideoReplicaPrompt(id);
     if (nodeAction === "resume-video-task") resumeVideoTask(id);
     if (nodeAction === "image-to-image") createImageToImage(id);
     if (nodeAction === "image-to-video") createImageToVideo(id);
@@ -9000,6 +9431,7 @@ document.addEventListener("click", async (event) => {
   if (action === "add-video") addNode("video");
   if (action === "add-image-config") addNode("imageConfig");
   if (action === "add-video-config") addNode("videoConfig");
+  if (action === "add-video-replica") addNode("videoReplicaConfig");
   if (action === "add-storyboard-config") addNode("storyboardConfig");
   if (action === "add-forced-perspective-poster") addImageTemplateNode("forced-perspective-poster");
   if (action === "add-template-image-config") addNode("templateImageConfig");
@@ -9017,9 +9449,8 @@ document.addEventListener("click", async (event) => {
   if (action === "zoom-out") setView({ ...state.view, zoom: state.view.zoom / 1.18 });
   if (action === "fit-view") fitView();
   if (action === "theme") {
-    state.theme = themeStyles.nextTheme(state.theme);
-    applyTheme();
-    saveState();
+    setThemeMenuOpen(themeMenu?.hidden !== false);
+    return;
   }
   if (action === "settings") {
     await openSettingsModal();

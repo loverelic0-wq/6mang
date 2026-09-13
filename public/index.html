@@ -6,6 +6,7 @@
     <title>6mang</title>
     <link rel="stylesheet" href="./styles.css" />
     <link rel="stylesheet" href="./director3d.css" />
+    <link rel="stylesheet" href="./video-replica.css" />
   </head>
   <body>
     <section class="project-home" id="projectHome" aria-label="项目管理">
@@ -49,9 +50,12 @@
           <button class="icon-button" data-action="download" title="批量下载" aria-label="批量下载">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14" /></svg>
           </button>
-          <button class="icon-button" data-action="theme" title="切换主题" aria-label="切换主题">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a7 7 0 1 0 9 9 5.5 5.5 0 0 1-9-9z" /></svg>
-          </button>
+          <div class="theme-picker">
+            <button class="icon-button" data-action="theme" title="画布皮肤" aria-label="选择画布皮肤" aria-haspopup="menu" aria-expanded="false" aria-controls="themeMenu">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a7 7 0 1 0 9 9 5.5 5.5 0 0 1-9-9z" /></svg>
+            </button>
+            <div class="theme-menu" id="themeMenu" role="menu" aria-label="画布皮肤" hidden></div>
+          </div>
           <button class="icon-button" data-action="provider-switch" title="切换 API 平台" aria-label="切换 API 平台">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h13l-3-3M20 16H7l3 3" /></svg>
           </button>
@@ -117,6 +121,7 @@
           <button data-action="add-seedream-edit"><span class="node-menu-icon purple"></span>精确图片编辑</button>
           <button data-action="add-layer-separation"><span class="node-menu-icon purple"></span>智能图层分离</button>
           <button data-action="add-video-config"><span class="node-menu-icon orange"></span>视频生成配置</button>
+          <button data-action="add-video-replica"><span class="node-menu-icon orange"></span>爆款视频复刻</button>
           <button data-action="add-image"><span class="node-menu-icon purple"></span>图片节点</button>
           <button data-action="add-image-compare"><span class="node-menu-icon blue"></span>图片对比</button>
           <button data-action="add-image-expand"><span class="node-menu-icon green"></span>图片扩展</button>
@@ -165,6 +170,7 @@
     <script src="./context-menu-model.js"></script>
     <script src="./theme-styles.js"></script>
     <script src="./video-polling.js"></script>
+    <script src="./video-replica.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

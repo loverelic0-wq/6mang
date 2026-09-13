@@ -1008,6 +1008,35 @@ async function handleApi(req, res, url) {
     const body = await readJson(req);
     const provider = getProvider("video", body.providerId);
     const model = body.model || provider.defaultModel;
+    if (body.workflow === "video-replica") {
+      const replica = require("../public/video-replica");
+      const invalid = (message) => {
+        const error = new Error(message);
+        error.statusCode = 400;
+        throw error;
+      };
+      const videoProviders = runtimeSettings.providers?.video?.items || {};
+      if (typeof body.providerId !== "string" || !Object.hasOwn(videoProviders, body.providerId) || !replica.isSupportedProvider(provider) || !isCprtProvider(provider)) {
+        invalid("爆款视频复刻必须选择已配置的智算谷视频渠道");
+      }
+      if (typeof body.model !== "string" || !replica.isSupportedModel(body.model) || !provider.models?.some((item) => item.id === body.model)) {
+        invalid("爆款视频复刻必须使用所选智算谷渠道中的 Seedance 2.0 多模态模型");
+      }
+      if (!provider.apiKey) invalid("请先配置智算谷视频渠道的 API Key");
+      const singleSource = (sources) => Array.isArray(sources) && sources.length === 1 && typeof sources[0] === "string" && sources[0].trim();
+      if (!singleSource(body.images) || !singleSource(body.videos)) invalid("爆款视频复刻需要一张人物图片和一段参考视频");
+      if (body.videoMode !== "reference") invalid("爆款视频复刻只支持全能参考模式");
+      if (!Number.isInteger(body.seconds) || body.seconds < 4 || body.seconds > 15) invalid("复刻视频时长必须为 4–15 秒的整数");
+      if (body.resolution !== "720p") invalid("爆款视频复刻当前支持 720p 输出");
+      if (!["adaptive", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"].includes(body.ratio)) invalid("请选择支持的复刻视频画幅");
+      if (body.generateAudio !== true || body.realPersonMode !== true || !Array.isArray(body.conversionSlots) || body.conversionSlots.length !== 1 || body.conversionSlots[0] !== "all") {
+        invalid("爆款视频复刻需要开启音频生成、真人模式和全部参考素材转换");
+      }
+      if (typeof body.prompt !== "string" || !body.prompt.trim() || body.prompt.length > 20480) invalid("请填写有效的复刻提示词（最多 20480 字符）");
+      // The general CPRT adapter accepts duration as an alias; keep this workflow
+      // bound to its validated seconds value rather than an unvalidated alias.
+      body.duration = body.seconds;
+    }
     if (isKlingProvider(provider)) {
       const images = Array.isArray(body.images) ? body.images.filter(Boolean) : [];
       const videos = Array.isArray(body.videos) ? body.videos.filter(Boolean) : [];

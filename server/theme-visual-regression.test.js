@@ -17,13 +17,17 @@ function findChrome() {
   return candidates.find((candidate) => fs.existsSync(candidate));
 }
 
-test("text-node overlay stays transparent so highlighted text remains visible in both themes", (t) => {
+test("text-node overlay stays transparent and illustrated presets keep their visual contracts", (t) => {
   const chrome = findChrome();
   if (!chrome) return t.skip("Chrome or Edge is required for the CSS cascade regression test");
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "6mang-theme-test-"));
   t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
   const stylesUrl = pathToFileURL(path.resolve(__dirname, "../public/styles.css")).href;
+  const tacticalTerrainPath = path.resolve(__dirname, "../public/assets/tactical-terrain-bg.png");
+  assert.ok(fs.existsSync(tacticalTerrainPath), "tactical terrain background asset is missing");
+  const arcaneRiftPath = path.resolve(__dirname, "../public/assets/arcane-rift-bg.png");
+  assert.ok(fs.existsSync(arcaneRiftPath), "arcane rift background asset is missing");
   const fixturePath = path.join(tempDir, "theme-fixture.html");
   fs.writeFileSync(fixturePath, `<!doctype html>
     <html>
@@ -32,16 +36,21 @@ test("text-node overlay stays transparent so highlighted text remains visible in
         <style>* { transition: none !important; }</style>
       </head>
       <body data-theme="studio-paper">
+        <div class="viewport"></div>
         <div class="node" data-type="text">
-          <div class="prompt-editor">
-            <div class="prompt-highlight">可读文字</div>
-            <textarea>可读文字</textarea>
+          <div class="node-card">
+            <div class="prompt-editor">
+              <div class="prompt-highlight">可读文字</div>
+              <textarea>可读文字</textarea>
+            </div>
           </div>
         </div>
         <output id="computed-styles"></output>
         <script>
           const textarea = document.querySelector("textarea");
           const highlight = document.querySelector(".prompt-highlight");
+          const card = document.querySelector(".node-card");
+          const viewport = document.querySelector(".viewport");
           const read = () => ({
             textareaBackground: getComputedStyle(textarea).backgroundColor,
             highlightColor: getComputedStyle(highlight).color,
@@ -50,7 +59,25 @@ test("text-node overlay stays transparent so highlighted text remains visible in
           document.body.dataset.theme = "graphite-night";
           document.body.classList.add("dark");
           const graphite = read();
-          document.querySelector("#computed-styles").textContent = JSON.stringify({ paper, graphite });
+          document.body.dataset.theme = "tactical-terminal";
+          const tactical = {
+            ...read(),
+            accentColor: getComputedStyle(document.body).getPropertyValue("--accent-color").trim(),
+            cardBackground: getComputedStyle(card).backgroundColor,
+            cardBorderColor: getComputedStyle(card).borderColor,
+            cardBorderRadius: getComputedStyle(card).borderRadius,
+            hasTerrainBackground: getComputedStyle(viewport).backgroundImage.includes("tactical-terrain-bg.png"),
+          };
+          document.body.dataset.theme = "arcane-rift";
+          const rift = {
+            ...read(),
+            accentColor: getComputedStyle(document.body).getPropertyValue("--accent-color").trim(),
+            cardBackground: getComputedStyle(card).backgroundColor,
+            cardBorderColor: getComputedStyle(card).borderColor,
+            cardBorderRadius: getComputedStyle(card).borderRadius,
+            hasArcaneBackground: getComputedStyle(viewport).backgroundImage.includes("arcane-rift-bg.png"),
+          };
+          document.querySelector("#computed-styles").textContent = JSON.stringify({ paper, graphite, tactical, rift });
         </script>
       </body>
     </html>`);
@@ -77,6 +104,24 @@ test("text-node overlay stays transparent so highlighted text remains visible in
     graphite: {
       textareaBackground: "rgba(0, 0, 0, 0)",
       highlightColor: "rgb(240, 241, 243)",
+    },
+    tactical: {
+      textareaBackground: "rgba(0, 0, 0, 0)",
+      highlightColor: "rgb(230, 236, 236)",
+      accentColor: "#17d58b",
+      cardBackground: "rgba(17, 28, 32, 0.94)",
+      cardBorderColor: "rgb(65, 80, 87)",
+      cardBorderRadius: "3px",
+      hasTerrainBackground: true,
+    },
+    rift: {
+      textareaBackground: "rgba(0, 0, 0, 0)",
+      highlightColor: "rgb(238, 246, 255)",
+      accentColor: "#d8ad63",
+      cardBackground: "rgba(7, 19, 31, 0.96)",
+      cardBorderColor: "rgb(185, 138, 66)",
+      cardBorderRadius: "5px",
+      hasArcaneBackground: true,
     },
   });
 });

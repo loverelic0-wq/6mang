@@ -29,7 +29,7 @@ test("node creation actions are grouped without omissions or duplicates", () => 
     },
     {
       label: "视频创作",
-      actions: ["add-director3d", "add-video-config"],
+      actions: ["add-director3d", "add-video-config", "add-video-replica"],
     },
     {
       label: "素材与预览",

@@ -44,6 +44,7 @@
       items: [
         { action: "add-director3d", label: "3D 导演台" },
         { action: "add-video-config", label: "视频生成配置" },
+        { action: "add-video-replica", label: "爆款视频复刻" },
       ],
     },
     {
