@@ -30,6 +30,7 @@ const modelCostRules = {
     "gpt-image-2.5-sunburst": 15,
     "gemini-3-pro-image-preview": 10,
     "gemini-3.1-flash-image-preview": 6,
+    "gemini-nano-banana-2.1": 6,
     "doubao-seedream-5-0-pro-260628": 8,
     "midjourney": 15,
     "niji-journey": 15,
@@ -357,11 +358,12 @@ function migrateLegacySettings(raw) {
       if (!existing) item.label = "nano banana";
       const extras = [
         { id: "gemini-3-pro-image-preview", label: "nano banana pro" },
-        { id: "gemini-3.1-flash-image-preview", label: "nano banana 2" },
+        { id: "gemini-nano-banana-2.1", label: "nano banana 2.1" },
       ];
       for (const m of extras) {
         if (!item.models.some((x) => x.id === m.id)) item.models.push(m);
       }
+      gptImageModels.migrateNanoBananaProvider(item);
     }
     providers[kind].items[id] = item;
   }
@@ -392,7 +394,7 @@ function normalizeProviders(input) {
 }
 
 function normalizeProviderItem(pdef) {
-  return {
+  const item = {
     label: String(pdef.label || ""),
     adapter: pdef.adapter === "kling-cli" ? "kling-cli" : "http",
     managed: Boolean(pdef.managed || pdef.adapter === "kling-cli"),
@@ -405,6 +407,7 @@ function normalizeProviderItem(pdef) {
           .map((m) => ({ id: String(m.id), label: String(m.label || m.id) }))
       : [],
   };
+  return gptImageModels.migrateNanoBananaProvider(item);
 }
 
 function getProvider(kind, providerId) {
@@ -606,6 +609,12 @@ function requireAdminOrThrow(req) {
 }
 
 async function handleApi(req, res, url) {
+  if (url.pathname === "/api/director/export" && req.method === "POST") {
+    const found = requireUser(req);
+    // 本地预演编码，不调用生成模型，不扣生成积分。
+    await require("./director-export").exportRequest(req, res, found.user.id, readJson);
+    return;
+  }
   if (url.pathname === "/api/auth/register" && req.method === "POST") {
     const body = await readJson(req);
     const username = String(body.username || "").trim();
@@ -1645,7 +1654,7 @@ function ensureProvider(provider) {
 // 部分上游（如 147ai.com）把 gemini 香蕉系图像模型挂在对话接口而非图像端点，
 // 这类模型必须走 /chat/completions，从返回的 markdown / data URL 里取图。
 function isChatImageModel(model) {
-  return /gemini.*image/i.test(String(model || ""));
+  return /gemini.*(?:image|banana)/i.test(String(model || ""));
 }
 
 // gemini 香蕉系常用宽高比（用来把任意像素尺寸吸附到最接近的标准比例）。

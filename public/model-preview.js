@@ -231,20 +231,26 @@ function mount(container, opts = {}) {
   const gizmoHelper = gizmo.getHelper();
   scene.add(gizmoHelper);
   let draggingGizmo = false;
+  let interactionEnabled = true;
   gizmo.addEventListener("dragging-changed", (e) => {
     draggingGizmo = e.value;
-    controls.enabled = !e.value;
+    controls.enabled = interactionEnabled && !draggingGizmo;
   });
   const notifySceneChange = () => { if (typeof opts.onChange === "function") opts.onChange(); };
-  gizmo.addEventListener("mouseUp", notifySceneChange);
+  gizmo.addEventListener("mouseUp", () => { emitSelection(); notifySceneChange(); });
   controls.addEventListener("end", notifySceneChange);
 
-  let modelRoot = null;
+  const modelsGroup = new THREE.Group();
+  scene.add(modelsGroup);
   let modelMaxSize = 0;
   let renderMode = opts.renderMode || "clay";
   let selected = null;
   let clipboard = null; // 复制粘贴用
-  const materialOverride = {};
+
+  const isModel = (object) => Boolean(object && object.parent === modelsGroup);
+  const modelId = (object) => object.userData.modelId;
+  const findModel = (id) => modelsGroup.children.find((object) => modelId(object) === id || object.uuid === id);
+  const selectedModel = () => isModel(selected) ? selected : null;
 
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
@@ -320,7 +326,7 @@ function mount(container, opts = {}) {
     root.traverse((m) => { if (m.isMesh && m.userData.srcMat === undefined) m.userData.srcMat = m.material; });
   }
   function eachEditableMesh(cb) {
-    if (modelRoot) modelRoot.traverse((m) => m.isMesh && cb(m));
+    modelsGroup.traverse((m) => m.isMesh && cb(m));
     primitivesGroup.traverse((m) => m.isMesh && cb(m));
   }
   function applyModeToMesh(mesh, mode) {
@@ -331,10 +337,10 @@ function mount(container, opts = {}) {
   }
 
   // ---- 材质通道（只作用于模型的标准材质，原始材质模式下可见）----
-  function modelStandardMaterials() {
+  function modelStandardMaterials(root = selectedModel()) {
     const set = new Set();
-    if (modelRoot) {
-      modelRoot.traverse((m) => {
+    if (root) {
+      root.traverse((m) => {
         if (!m.isMesh) return;
         const arr = Array.isArray(m.userData.srcMat) ? m.userData.srcMat : [m.userData.srcMat];
         arr.forEach((x) => { if (x && x.isMeshStandardMaterial) set.add(x); });
@@ -342,8 +348,8 @@ function mount(container, opts = {}) {
     }
     return [...set];
   }
-  function applyMaterialChannel(ch, val) {
-    modelStandardMaterials().forEach((m) => {
+  function applyMaterialChannel(ch, val, root = selectedModel()) {
+    modelStandardMaterials(root).forEach((m) => {
       if (ch === "metalness") m.metalness = Number(val);
       else if (ch === "roughness") m.roughness = Number(val);
       else if (ch === "envMapIntensity") m.envMapIntensity = Number(val);
@@ -371,14 +377,14 @@ function mount(container, opts = {}) {
     while (o.parent) {
       if (o.parent === primitivesGroup) return o;
       if (o.parent === lightsGroup) return o;
-      if (o === modelRoot) return modelRoot;
+      if (isModel(o)) return o;
       o = o.parent;
     }
     return null;
   }
   function selectionInfo() {
     if (!selected) return { kind: null };
-    if (selected === modelRoot) return { kind: "model", channels: readModelChannels() };
+    if (isModel(selected)) return { kind: "model", id: modelId(selected), name: selected.name, channels: readModelChannels() };
     if (selected.parent === lightsGroup) {
       const light = selected.userData.light;
       return { kind: "light", lightType: selected.userData.lightType, intensity: light.intensity, color: `#${light.color.getHexString()}` };
@@ -410,14 +416,13 @@ function mount(container, opts = {}) {
     pickOnGizmo = Boolean(gizmo.axis);
   }
   function onPointerUpPick(e) {
-    if (pickOnGizmo || draggingGizmo) return;
+    if (!interactionEnabled || e.button !== 0 || pickOnGizmo || draggingGizmo) return;
     if (Math.hypot(e.clientX - pickX, e.clientY - pickY) > 5) return;
     const rect = renderer.domElement.getBoundingClientRect();
     pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(pointer, activeCamera());
-    const targets = [...primitivesGroup.children, ...lightsGroup.children];
-    if (modelRoot) targets.push(modelRoot);
+    const targets = [...modelsGroup.children, ...primitivesGroup.children, ...lightsGroup.children];
     const hits = raycaster.intersectObjects(targets, true);
     if (hits.length) selectObject(topSelectable(hits[0].object));
     else deselect();
@@ -429,7 +434,7 @@ function mount(container, opts = {}) {
   let running = true;
   function tick() {
     if (disposed || !running) return;
-    controls.update();
+    if (interactionEnabled && !draggingGizmo) controls.update();
     if (lightsGroup.children.length) {
       scene.updateMatrixWorld(); // 让灯外形 helper 拿到当前灯位/朝向
       lightsGroup.children.forEach((r) => { const h = r.userData.helper; if (h && h.visible) h.update(); });
@@ -482,14 +487,14 @@ function mount(container, opts = {}) {
   }
 
   function frameModel(cam, targetVec, fitOffset = 1.35) {
-    const target = modelRoot || primitivesGroup;
-    target.updateMatrixWorld(true);
-    const box = new THREE.Box3().setFromObject(target);
+    const box = modelBounds();
+    primitivesGroup.updateMatrixWorld(true);
+    box.union(new THREE.Box3().setFromObject(primitivesGroup));
     if (box.isEmpty()) return;
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
     const maxSize = Math.max(size.x, size.y, size.z) || 1;
-    const fitHeightDistance = maxSize / (2 * Math.atan((Math.PI * cam.fov) / 360));
+    const fitHeightDistance = maxSize / (2 * Math.tan((Math.PI * cam.fov) / 360));
     const fitWidthDistance = fitHeightDistance / cam.aspect;
     const distance = fitOffset * Math.max(fitHeightDistance, fitWidthDistance);
     if (cam === freeCamera) {
@@ -512,22 +517,77 @@ function mount(container, opts = {}) {
   }
 
   function disposeObject(object) {
+    const geometries = new Set();
+    const materials = new Set();
+    const textures = new Set();
+    const sharedModes = new Set(Object.values(modeMaterials));
     object.traverse((child) => {
-      if (child.geometry) child.geometry.dispose();
-      const mats = Array.isArray(child.material) ? child.material : child.material ? [child.material] : [];
-      mats.forEach((m) => {
-        for (const key in m) { const v = m[key]; if (v && v.isTexture) v.dispose(); }
-        if (m && m.dispose) m.dispose();
-      });
+      if (child.geometry) geometries.add(child.geometry);
+      // 渲染风格材质由控制器共享；源材质和贴图归各模型所有。
+      for (const value of [child.userData.srcMat, child.material]) {
+        for (const material of Array.isArray(value) ? value : [value]) {
+          if (material && !sharedModes.has(material)) materials.add(material);
+        }
+      }
     });
+    materials.forEach((material) => {
+      for (const value of Object.values(material)) if (value && value.isTexture) textures.add(value);
+    });
+    textures.forEach((texture) => texture.dispose());
+    materials.forEach((material) => material.dispose());
+    geometries.forEach((geometry) => geometry.dispose());
+  }
+
+  function modelBounds() {
+    modelsGroup.updateMatrixWorld(true);
+    return new THREE.Box3().setFromObject(modelsGroup);
+  }
+
+  function updateModelMetrics() {
+    const box = modelBounds();
+    const size = box.getSize(new THREE.Vector3());
+    modelMaxSize = box.isEmpty() ? 0 : Math.max(size.x, size.y, size.z) || 1;
+    buildGrid();
+    configureLightShadow(baseDir, "directional");
+    lightsGroup.children.forEach((rig) => configureLightShadow(rig.userData.light, rig.userData.lightType));
+    applyAoParams();
+  }
+
+  function clearModels() {
+    if (isModel(selected)) deselect();
+    [...modelsGroup.children].forEach((root) => { modelsGroup.remove(root); disposeObject(root); });
+  }
+
+  function serializeModel(root) {
+    return {
+      id: modelId(root), assetId: root.userData.assetId, name: root.name, format: root.userData.format,
+      position: root.position.toArray(), rotation: [root.rotation.x, root.rotation.y, root.rotation.z], scale: root.scale.toArray(),
+      materialOverride: { ...root.userData.materialOverride },
+    };
+  }
+
+  function restoreModelState(root, state) {
+    const isVector = (value) => Array.isArray(value) && value.length === 3 && value.every(Number.isFinite);
+    if (isVector(state.position)) root.position.fromArray(state.position);
+    if (isVector(state.rotation)) root.rotation.set(...state.rotation);
+    if (isVector(state.scale)) root.scale.fromArray(state.scale);
+    if (typeof state.name === "string") root.name = state.name.slice(0, 80);
+    if (state.assetId !== undefined) root.userData.assetId = state.assetId;
+    if (state.materialOverride && typeof state.materialOverride === "object") {
+      for (const [channel, value] of Object.entries(state.materialOverride)) {
+        if (!MATERIAL_CHANNELS.includes(channel)) continue;
+        root.userData.materialOverride[channel] = value;
+        applyMaterialChannel(channel, value, root);
+      }
+    }
   }
 
   function syncActiveTargetBack() {
     (viewMode === "shot" ? shotTarget : freeTarget).copy(controls.target);
   }
 
-  function createPrimitiveMesh(kind) {
-    const u = sceneUnit();
+  function createPrimitiveMesh(kind, unit = sceneUnit()) {
+    const u = Number.isFinite(unit) && unit > 0 ? unit : sceneUnit();
     const geo = makePrimitiveGeometry(kind, u);
     const mat = new THREE.MeshStandardMaterial({
       color: 0xbcbcc4, roughness: 0.85, metalness: 0.05,
@@ -536,6 +596,7 @@ function mount(container, opts = {}) {
     const mesh = new THREE.Mesh(geo, mat);
     mesh.userData.srcMat = mat;
     mesh.userData.primKind = kind;
+    mesh.userData.unit = u;
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     if (kind === "plane") {
@@ -607,13 +668,26 @@ function mount(container, opts = {}) {
   }
 
   const controller = {
-    async loadModel(blob, format) {
+    async loadModel(blob, format, options = {}) {
+      options = options || {};
+      if (disposed) return false;
       const arrayBuffer = await blob.arrayBuffer();
-      const root = await parseModel(String(format || "").toLowerCase(), arrayBuffer);
+      const normalizedFormat = String(format || "").toLowerCase();
+      const root = await parseModel(normalizedFormat, arrayBuffer);
       if (!root) throw new Error("模型解析为空");
       if (disposed) { disposeObject(root); return false; }
-      if (modelRoot) { scene.remove(modelRoot); disposeObject(modelRoot); }
+      const append = Boolean(options.append);
+      const hadModels = modelsGroup.children.length > 0;
+      const id = String(options.id || (append && hadModels ? THREE.MathUtils.generateUUID() : "model"));
+      if (append && findModel(id)) { disposeObject(root); throw new Error("场景中已有相同编号的模型"); }
       root.updateMatrixWorld(true);
+      let hasMesh = false;
+      root.traverse((object) => { if (object.isMesh) hasMesh = true; });
+      const parsedBounds = new THREE.Box3().setFromObject(root);
+      if (!hasMesh || parsedBounds.isEmpty() || ![...parsedBounds.min.toArray(), ...parsedBounds.max.toArray()].every(Number.isFinite)) {
+        disposeObject(root);
+        throw new Error("模型中没有可显示的网格");
+      }
       if (opts.director) {
         const size = new THREE.Box3().setFromObject(root).getSize(new THREE.Vector3());
         const extent = Math.max(size.x, size.y, size.z);
@@ -621,28 +695,49 @@ function mount(container, opts = {}) {
         root.updateMatrixWorld(true);
       }
       const box0 = new THREE.Box3().setFromObject(root);
-      let maxS = 1;
+      let initialGroundY = 0;
       if (!box0.isEmpty()) {
         const c0 = box0.getCenter(new THREE.Vector3());
         const s0 = box0.getSize(new THREE.Vector3());
-        maxS = Math.max(s0.x, s0.y, s0.z) || 1;
         root.position.sub(opts.director ? new THREE.Vector3(c0.x, box0.min.y, c0.z) : c0);
-        groundY = opts.director ? 0 : -s0.y / 2;
+        initialGroundY = opts.director ? 0 : -s0.y / 2;
       }
-      modelMaxSize = maxS;
-      buildGrid();
       const pivot = new THREE.Group();
       pivot.add(root);
-      modelRoot = pivot;
-      scene.add(modelRoot);
-      registerSrcMaterials(modelRoot);
-      modelRoot.traverse((m) => { if (m.isMesh) { m.castShadow = true; m.receiveShadow = true; } });
-      configureLightShadow(baseDir, "directional");
-      applyAoParams();
-      applyRenderMode(renderMode);
-      frameModel(shotCamera, shotTarget, 1.35);
-      frameModel(freeCamera, freeTarget, 2.0);
-      controller.setViewMode("shot");
+      pivot.userData.modelId = id;
+      pivot.userData.assetId = options.assetId || null;
+      pivot.userData.format = normalizedFormat;
+      const baseSize = box0.getSize(new THREE.Vector3());
+      pivot.userData.baseSize = Math.max(baseSize.x, baseSize.y, baseSize.z) || 1;
+      pivot.userData.materialOverride = {};
+      pivot.name = String(options.name || blob.name || "模型").slice(0, 80);
+      registerSrcMaterials(pivot);
+      pivot.traverse((m) => {
+        if (m.isMesh) { m.castShadow = true; m.receiveShadow = true; applyModeToMesh(m, renderMode); }
+      });
+      if (append && hadModels && options.autoPlace !== false) {
+        const occupied = modelBounds();
+        pivot.updateMatrixWorld(true);
+        const incoming = new THREE.Box3().setFromObject(pivot);
+        if (!occupied.isEmpty() && !incoming.isEmpty()) {
+          const incomingSize = incoming.getSize(new THREE.Vector3());
+          const gap = Math.max(modelMaxSize, incomingSize.x, incomingSize.y, incomingSize.z, 0.01) * 0.1;
+          pivot.position.x += occupied.max.x + gap - incoming.min.x;
+          pivot.position.y += groundY - incoming.min.y;
+          pivot.position.z += occupied.getCenter(new THREE.Vector3()).z - incoming.getCenter(new THREE.Vector3()).z;
+        }
+      }
+      // 解析、准备完毕后才替换旧模型，失败导入不会清空已有场景。
+      if (!append) clearModels();
+      if (!append || !hadModels) groundY = initialGroundY;
+      modelsGroup.add(pivot);
+      updateModelMetrics();
+      if (!append || !hadModels) {
+        frameModel(shotCamera, shotTarget, 1.35);
+        frameModel(freeCamera, freeTarget, 2.0);
+        controller.setViewMode("shot");
+      }
+      if (options.select !== false) selectObject(pivot);
       shotCamera.updateMatrixWorld(true);
       camHelper.update();
       return true;
@@ -668,7 +763,11 @@ function mount(container, opts = {}) {
       shotCamera.updateMatrixWorld(true);
       camHelper.update();
     },
-    setInteractionEnabled(on) { controls.enabled = Boolean(on); gizmo.enabled = Boolean(on); },
+    setInteractionEnabled(on) {
+      interactionEnabled = Boolean(on);
+      controls.enabled = interactionEnabled && !draggingGizmo;
+      gizmo.enabled = interactionEnabled;
+    },
     setViewMode(mode) {
       const next = mode === "free" ? "free" : "shot";
       syncActiveTargetBack();
@@ -684,6 +783,7 @@ function mount(container, opts = {}) {
       if (viewMode === "shot") frameModel(shotCamera, shotTarget, 1.35);
       else frameModel(freeCamera, freeTarget, 2.0);
     },
+    frame() { controller.resetView(); },
     setPanMode(on) { controls.mouseButtons.LEFT = on ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE; },
 
     setRenderMode(mode) { renderMode = mode; applyRenderMode(mode); },
@@ -719,6 +819,7 @@ function mount(container, opts = {}) {
       primitivesGroup.add(mesh);
       applyModeToMesh(mesh, renderMode);
       selectObject(mesh);
+      notifySceneChange();
       return mesh.uuid;
     },
 
@@ -728,6 +829,7 @@ function mount(container, opts = {}) {
       const rig = createLightRig(k);
       lightsGroup.add(rig);
       selectObject(rig);
+      notifySceneChange();
       return rig.uuid;
     },
     setPrimitiveColor(hex) {
@@ -744,20 +846,21 @@ function mount(container, opts = {}) {
 
     // 选中
     deleteSelected() {
-      if (!selected || selected === modelRoot) return false;
+      if (!selected) return false;
       const obj = selected;
       deselect();
+      if (isModel(obj)) { modelsGroup.remove(obj); disposeObject(obj); updateModelMetrics(); emitSelection(); notifySceneChange(); return true; }
       if (obj.parent === lightsGroup) { lightsGroup.remove(obj); disposeLightRig(obj); emitSelection(); notifySceneChange(); return true; }
       if (obj.parent === primitivesGroup) { primitivesGroup.remove(obj); disposeObject(obj); emitSelection(); notifySceneChange(); return true; }
       return false;
     },
-    // 复制粘贴：模型不复制（只一个）。
+    // 复制粘贴支持零件和灯；导入模型通过追加载入创建独立资源。
     copySelected() {
       if (!selected) return false;
       const o = selected;
-      const base = { position: o.position.toArray(), rotation: [o.rotation.x, o.rotation.y, o.rotation.z], scale: o.scale.toArray() };
+      const base = { name: o.name, position: o.position.toArray(), rotation: [o.rotation.x, o.rotation.y, o.rotation.z], scale: o.scale.toArray() };
       if (o.parent === primitivesGroup) {
-        clipboard = { kind: "primitive", primKind: o.userData.primKind, color: `#${o.userData.srcMat.color.getHexString()}`, ...base };
+        clipboard = { kind: "primitive", primKind: o.userData.primKind, unit: o.userData.unit, color: `#${o.userData.srcMat.color.getHexString()}`, ...base };
         return true;
       }
       if (o.parent === lightsGroup) {
@@ -770,7 +873,8 @@ function mount(container, opts = {}) {
       if (!clipboard) return false;
       const off = sceneUnit() * 0.4; // 偏移一点避免完全重叠
       if (clipboard.kind === "primitive") {
-        const mesh = createPrimitiveMesh(clipboard.primKind);
+        const mesh = createPrimitiveMesh(clipboard.primKind, clipboard.unit);
+        mesh.name = clipboard.name ? `${clipboard.name} 副本` : "";
         mesh.position.fromArray(clipboard.position);
         mesh.position.x += off; mesh.position.z += off;
         mesh.rotation.set(clipboard.rotation[0], clipboard.rotation[1], clipboard.rotation[2]);
@@ -779,18 +883,22 @@ function mount(container, opts = {}) {
         primitivesGroup.add(mesh);
         applyModeToMesh(mesh, renderMode);
         selectObject(mesh);
+        notifySceneChange();
         return true;
       }
       if (clipboard.kind === "light") {
         const rig = createLightRig(clipboard.lightType);
+        rig.name = clipboard.name ? `${clipboard.name} 副本` : "";
         rig.position.fromArray(clipboard.position);
         rig.position.x += off; rig.position.z += off;
         rig.rotation.set(clipboard.rotation[0], clipboard.rotation[1], clipboard.rotation[2]);
+        rig.scale.fromArray(clipboard.scale);
         rig.userData.light.intensity = clipboard.intensity;
         rig.userData.light.color.set(clipboard.color);
         rig.userData.icon.material.color.set(clipboard.color);
         lightsGroup.add(rig);
         selectObject(rig);
+        notifySceneChange();
         return true;
       }
       return false;
@@ -807,14 +915,16 @@ function mount(container, opts = {}) {
       if (field === "rotation") v = THREE.MathUtils.degToRad(v);
       if (field === "scale") v = Math.max(0.01, Math.min(1000, v));
       selected[field][["x", "y", "z"][axis]] = v;
+      notifySceneChange();
     },
-    renameSelected(name, notify = true) { if (selected) { selected.name = String(name).slice(0, 80); if (notify) emitSelection(); } },
+    renameSelected(name, notify = true) { if (selected) { selected.name = String(name).slice(0, 80); if (notify) emitSelection(); notifySceneChange(); } },
+    setSelectedName(name, notify = true) { controller.renameSelected(name, notify); },
     // Outliner：列出场景所有可选对象（模型/零件/灯），带当前选中标记。
     getObjects() {
       const PRIM = { box: "立方体", sphere: "球体", cone: "圆锥", cylinder: "圆柱", plane: "平面", torus: "圆环", actor: "站姿角色", seatedActor: "坐姿角色" };
       const LIGHT = { directional: "平行光", point: "点光", spot: "聚光" };
       const out = [];
-      if (modelRoot) out.push({ id: modelRoot.uuid, kind: "model", label: "模型" });
+      modelsGroup.children.forEach((root, index) => out.push({ id: modelId(root), kind: "model", label: root.name || `模型 ${index + 1}` }));
       const pc = {};
       primitivesGroup.children.forEach((m) => {
         const k = m.userData.primKind || "box";
@@ -825,13 +935,15 @@ function mount(container, opts = {}) {
       lightsGroup.children.forEach((r) => {
         const t = r.userData.lightType;
         lc[t] = (lc[t] || 0) + 1;
-        out.push({ id: r.uuid, kind: "light", label: `${LIGHT[t] || t} ${lc[t]}` });
+        out.push({ id: r.uuid, kind: "light", label: r.name || `${LIGHT[t] || t} ${lc[t]}` });
       });
-      const selId = selected ? selected.uuid : null;
+      const selId = isModel(selected) ? modelId(selected) : selected ? selected.uuid : null;
       return out.map((o) => ({ ...o, selected: o.id === selId }));
     },
+    listSceneObjects() { return controller.getObjects(); },
     selectById(id) {
-      if (modelRoot && modelRoot.uuid === id) { selectObject(modelRoot); return; }
+      const model = findModel(id);
+      if (model) { selectObject(model); return; }
       const p = primitivesGroup.children.find((o) => o.uuid === id);
       if (p) { selectObject(p); return; }
       const l = lightsGroup.children.find((o) => o.uuid === id);
@@ -868,9 +980,10 @@ function mount(container, opts = {}) {
 
     // 材质通道（模型级）
     setMaterialChannel(ch, val) {
-      if (!MATERIAL_CHANNELS.includes(ch)) return;
-      materialOverride[ch] = val;
-      applyMaterialChannel(ch, val);
+      const root = selectedModel();
+      if (!root || !MATERIAL_CHANNELS.includes(ch)) return;
+      root.userData.materialOverride[ch] = val;
+      applyMaterialChannel(ch, val, root);
     },
     getModelChannels() { return readModelChannels(); },
 
@@ -888,23 +1001,28 @@ function mount(container, opts = {}) {
 
     getState() {
       syncActiveTargetBack();
+      const models = modelsGroup.children.map(serializeModel);
       return {
         renderMode,
         mode: viewMode,
         envIntensity,
         envBackground,
+        groundY,
         shadow: shadowOn,
         ao: aoOn,
         aoRadius,
         background: typeof bgColor === "number" ? `#${bgColor.toString(16).padStart(6, "0")}` : bgColor,
         shot: { fov: shotCamera.fov, position: shotCamera.position.toArray(), target: shotTarget.toArray() },
+        free: { fov: freeCamera.fov, position: freeCamera.position.toArray(), target: freeTarget.toArray() },
         cameraClip: { enabled: clipEnabled, focus: focusDist, front: frontRange, back: backRange },
-        model: modelRoot
-          ? { position: modelRoot.position.toArray(), rotation: [modelRoot.rotation.x, modelRoot.rotation.y, modelRoot.rotation.z], scale: modelRoot.scale.toArray() }
-          : null,
-        materialOverride: { ...materialOverride },
+        models,
+        // 旧工程和导演台仍可读取第一份模型的兼容字段。
+        model: models[0] ? { position: models[0].position, rotation: models[0].rotation, scale: models[0].scale } : null,
+        materialOverride: { ...models[0]?.materialOverride },
+        selectedModelId: isModel(selected) ? modelId(selected) : null,
         primitives: primitivesGroup.children.map((m) => ({
           kind: m.userData.primKind || "box",
+          unit: m.userData.unit,
           name: m.name,
           position: m.position.toArray(),
           rotation: [m.rotation.x, m.rotation.y, m.rotation.z],
@@ -913,8 +1031,10 @@ function mount(container, opts = {}) {
         })),
         lights: lightsGroup.children.map((r) => ({
           type: r.userData.lightType,
+          name: r.name,
           position: r.position.toArray(),
           rotation: [r.rotation.x, r.rotation.y, r.rotation.z],
+          scale: r.scale.toArray(),
           intensity: r.userData.light.intensity,
           color: `#${r.userData.light.color.getHexString()}`,
         })),
@@ -922,6 +1042,7 @@ function mount(container, opts = {}) {
     },
     setState(state) {
       if (!state) return;
+      syncActiveTargetBack();
       const shot = state.shot || (state.position ? { fov: state.fov, position: state.position, target: state.target } : null);
       if (shot) {
         if (typeof shot.fov === "number") shotCamera.fov = shot.fov;
@@ -938,21 +1059,30 @@ function mount(container, opts = {}) {
         applyShotClip();
       }
       if (state.renderMode) renderMode = state.renderMode;
-      if (state.background) controller.setBackground(state.background);
+      if (Object.hasOwn(state, "background")) controller.setBackground(state.background);
       if (typeof state.envIntensity === "number") controller.setEnvIntensity(state.envIntensity);
       if (typeof state.envBackground === "boolean") controller.setEnvBackground(state.envBackground);
       if (typeof state.shadow === "boolean") controller.setShadow(state.shadow);
       if (typeof state.aoRadius === "number") controller.setAORadius(state.aoRadius);
       if (typeof state.ao === "boolean") controller.setAO(state.ao);
-      if (state.model && modelRoot) {
-        if (Array.isArray(state.model.position)) modelRoot.position.fromArray(state.model.position);
-        if (Array.isArray(state.model.rotation)) modelRoot.rotation.set(state.model.rotation[0], state.model.rotation[1], state.model.rotation[2]);
-        if (Array.isArray(state.model.scale)) modelRoot.scale.fromArray(state.model.scale);
+      if (Array.isArray(state.models)) {
+        state.models.forEach((model) => {
+          if (!model || typeof model !== "object") return;
+          const root = findModel(model.id);
+          if (root) restoreModelState(root, model);
+        });
+      } else if (modelsGroup.children.length && (state.model || state.materialOverride)) {
+        const root = findModel("model") || modelsGroup.children[0];
+        restoreModelState(root, { ...state.model, materialOverride: state.materialOverride });
       }
+      if (Number.isFinite(state.groundY)) groundY = state.groundY;
+      updateModelMetrics();
       if (Array.isArray(state.primitives)) {
         clearPrimitives();
+        // 旧场景零件未记录尺寸单位，按首个模型原始导入尺寸恢复。
+        const legacyUnit = opts.director ? 1 : (modelsGroup.children[0]?.userData.baseSize || 4) * 0.25;
         state.primitives.forEach((p) => {
-          const mesh = createPrimitiveMesh(p.kind);
+          const mesh = createPrimitiveMesh(p.kind, p.unit === undefined ? legacyUnit : p.unit);
           mesh.name = String(p.name || "").slice(0, 80);
           if (Array.isArray(p.position)) mesh.position.fromArray(p.position);
           if (Array.isArray(p.rotation)) mesh.rotation.set(p.rotation[0], p.rotation[1], p.rotation[2]);
@@ -965,44 +1095,51 @@ function mount(container, opts = {}) {
         clearLights();
         state.lights.forEach((l) => {
           const rig = createLightRig(l.type);
+          rig.name = String(l.name || "").slice(0, 80);
           if (Array.isArray(l.position)) rig.position.fromArray(l.position);
           if (Array.isArray(l.rotation)) rig.rotation.set(l.rotation[0], l.rotation[1], l.rotation[2]);
+          if (Array.isArray(l.scale)) rig.scale.fromArray(l.scale);
           if (typeof l.intensity === "number") rig.userData.light.intensity = l.intensity;
           if (l.color) { rig.userData.light.color.set(l.color); rig.userData.icon.material.color.set(l.color); }
           lightsGroup.add(rig);
         });
       }
       applyRenderMode(renderMode);
-      // 材质覆盖最后套用（模型已就位）。
-      if (state.materialOverride) {
-        Object.assign(materialOverride, state.materialOverride);
-        Object.entries(materialOverride).forEach(([ch, val]) => applyMaterialChannel(ch, val));
+      if (state.selectedModelId && findModel(state.selectedModelId)) selectObject(findModel(state.selectedModelId));
+      if (state.free) {
+        if (Array.isArray(state.free.position)) freeCamera.position.fromArray(state.free.position);
+        if (Array.isArray(state.free.target)) freeTarget.fromArray(state.free.target);
+        if (Number.isFinite(state.free.fov)) freeCamera.fov = state.free.fov;
+        freeCamera.updateProjectionMatrix();
       }
-      if (viewMode === "shot") { controls.object = shotCamera; controls.target.copy(shotTarget); }
+      if (state.mode === "shot" || state.mode === "free") viewMode = state.mode;
+      controls.object = activeCamera();
+      controls.target.copy(viewMode === "shot" ? shotTarget : freeTarget);
+      gizmo.camera = activeCamera();
       shotCamera.lookAt(shotTarget);
+      freeCamera.lookAt(freeTarget);
       controls.update();
       camHelper.update();
     },
 
-    capture(type = "image/png", ratio = null) {
+    captureCanvas(ratio = null, outputSize = null) {
       const gv = gizmoHelper.visible;
       const grv = grid ? grid.visible : false;
-      gizmoHelper.visible = false;
-      if (grid) grid.visible = false;
-      setLightIconsVisible(false); // 灯标不进截图，但灯光效果保留
-      shotCamera.aspect = (container.clientWidth || width) / (container.clientHeight || height);
-      shotCamera.updateProjectionMatrix();
-      if (aoOn) {
-        renderPass.camera = shotCamera;
-        gtaoPass.camera = shotCamera;
-        composer.render();
-      } else {
-        renderer.render(scene, shotCamera);
-      }
-      const src = renderer.domElement;
-      let url;
-      const ar = Number(ratio) || 0;
-      if (ar > 0) {
+      try {
+        gizmoHelper.visible = false;
+        if (grid) grid.visible = false;
+        setLightIconsVisible(false);
+        shotCamera.aspect = (container.clientWidth || width) / (container.clientHeight || height);
+        shotCamera.updateProjectionMatrix();
+        if (aoOn) {
+          renderPass.camera = shotCamera;
+          gtaoPass.camera = shotCamera;
+          composer.render();
+        } else {
+          renderer.render(scene, shotCamera);
+        }
+        const src = renderer.domElement;
+        const ar = Number(ratio) > 0 ? Number(ratio) : src.width / src.height;
         const cw = src.width;
         const ch = src.height;
         let w;
@@ -1011,17 +1148,18 @@ function mount(container, opts = {}) {
         const sx = Math.round((cw - w) / 2);
         const sy = Math.round((ch - h) / 2);
         const c = document.createElement("canvas");
-        c.width = w;
-        c.height = h;
-        c.getContext("2d").drawImage(src, sx, sy, w, h, 0, 0, w, h);
-        url = c.toDataURL(type);
-      } else {
-        url = src.toDataURL(type);
+        c.width = outputSize?.width || w;
+        c.height = outputSize?.height || h;
+        c.getContext("2d").drawImage(src, sx, sy, w, h, 0, 0, c.width, c.height);
+        return c;
+      } finally {
+        gizmoHelper.visible = gv;
+        if (grid) grid.visible = grv;
+        setLightIconsVisible(true);
       }
-      gizmoHelper.visible = gv;
-      if (grid) grid.visible = grv;
-      setLightIconsVisible(true);
-      return url;
+    },
+    capture(type = "image/png", ratio = null) {
+      return controller.captureCanvas(ratio).toDataURL(type);
     },
 
     dispose() {
@@ -1039,7 +1177,7 @@ function mount(container, opts = {}) {
       if (grid) { scene.remove(grid); grid.geometry.dispose(); grid.material.dispose(); grid = null; }
       clearPrimitives();
       clearLights();
-      if (modelRoot) { scene.remove(modelRoot); disposeObject(modelRoot); modelRoot = null; }
+      clearModels();
       Object.values(modeMaterials).forEach((m) => m && m.dispose && m.dispose());
       if (gtaoPass.dispose) gtaoPass.dispose();
       composer.dispose();

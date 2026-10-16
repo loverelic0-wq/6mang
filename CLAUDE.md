@@ -47,7 +47,7 @@ try {
 
 **计费表** 写死在 `server.js` 顶部 `modelCostRules`：
 - `chat`: 默认 1（覆盖 `/api/chat/polish` 和 `/api/chat/optimize-prompt`）
-- `image`: 按模型 6–15（`gpt-image-2`=15，`gemini-3-pro-image-preview`=10，`gemini-3.1-flash-image-preview`=6，`midjourney`/`niji-journey`=15，默认 8）
+- `image`: 按模型 6–15（`gpt-image-2`=15，`gemini-3-pro-image-preview`=10，`gemini-3.1-flash-image-preview`/`gemini-nano-banana-2.1`=6，`midjourney`/`niji-journey`=15，默认 8）
 - `video`: 默认 60
 
 加新模型时同时更新这张表，否则会走 `default`。注意计费按 **model id** 查表，不按 provider —— 同一个 model id 在不同 provider 下费率一致。
@@ -189,6 +189,14 @@ try {
 - **AO（GTAO 后处理）**：`EffectComposer`(RenderPass → GTAOPass → OutputPass)。`aoOn` 时 tick/capture 走 `composer.render()`（每帧把 `renderPass.camera`/`gtaoPass.camera` 设成当前活动相机），否则走普通 `renderer.render`；自由视角取景框第二 pass 照旧叠加。AO「宽度」= GTAO `radius`（`setAORadius` 归一化 0..1 × `modelMaxSize`，`applyAoParams` 写 `updateGtaoMaterial`）。gizmo 条「AO」开关默认**关**、footer「AO宽」滑块。`resize` 要同步 `composer.setSize`/`gtaoPass.setSize`。postprocessing addon 全在 `vendor/three/jsm/postprocessing` + `shaders` + `math/SimplexNoise.js`。shadow/ao/aoRadius 随 `getState()` 持久化。
 
 ### 状态分层（多种持久化，**不要混用**）
+
+导演台坐标与导出约束：`setInteractionEnabled` 必须同时尊重 gizmo 拖动锁，外层 `stop()` 只能释放其持有的播放锁，否则拖动对象会同时旋转镜头。自由相机 `free`、`mode` 与灯光名称/缩放随场景持久化；复制粘贴、变换更新必须通知自动保存。
+
+`POST /api/director/export` 是要求登录的本地 FFmpeg 编码接口（`server/director-export.js`），不调用上游、不扣生成积分。只接受尺寸一致的 JPEG 帧序列，24 FPS、1–30 秒，最大 48 MiB 帧数据；限制同一用户并发、支持取消、清理临时文件。视频经 `persistVideoBlob` 写 IndexedDB。`Director3D.seedanceTarget` 选择已配置的兼容视频参考模型，创建草稿节点与输入连线，不自动提交付费任务。现有图像/视频 provider、账本和素材上传链路保持原有契约。
+
+视频配置的独立输入插槽由 `public/video-inputs.js` 描述，角色存于 `edge.data.videoRole`（camera/environment/subject/prompt/reference/first/last），不根据节点名称猜测用途。参考模式保留原素材顺序与编号；首尾帧模式按显式角色排列。`layoutImageInputPorts` 同时对齐图片、视频配置每行的端口及连线，替换素材只改对应边、不删除源节点。环境/主体用途通过提示词接入已有 API；`directorFollow` 独立控制运镜要求。导演台卡片封面使用 `data.directorPoster` 和 IndexedDB，与可生成参考的 `data.url` 分开；关闭编辑器与导出预演时更新。
+
+预演默认成片文案由 `Director3D.cameraGuidance/videoPrompt` 在提交时加入节点规则；导出创建的画面要求为空，`directorPromptVersion:1` 标记该行为。项目加载/导入时，`migratePromptNodes` 只移除旧自动文本的精确开头，保留用户追加的场景；共用文本、已关闭跟随或首尾帧流程不迁移。默认真实材质与自然光影不能覆盖用户明确指定的风格。
 
 | 数据 | 存储 | 键 / 路径 |
 |---|---|---|

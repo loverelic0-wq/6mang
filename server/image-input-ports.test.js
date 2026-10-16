@@ -6,7 +6,9 @@ const vm = require("node:vm");
 // Execute the real browser slot/resolution functions without DOM, storage, or API access.
 function harness({ nodes = [], edges = [], resolve = async (url) => typeof url === "string" ? url : "" } = {}) {
   const state = { nodes, edges };
-  const context = vm.createContext({ state, resolveImageForApi: resolve });
+  const context = vm.createContext({ state, resolveImageForApi: resolve,
+    window: { VideoInputs: require("../public/video-inputs") },
+    getVideoMode: (data) => data?.videoMode === "first_last" ? "first_last" : "reference" });
   const source = fs.readFileSync(require.resolve("../public/app.js"), "utf8");
   for (const name of [
     "migrateImageInputSlots",

@@ -25,11 +25,15 @@ test("node creation actions are grouped without omissions or duplicates", () => 
     },
     {
       label: "图片编辑",
-      actions: ["add-style-transfer-config", "add-material-transfer-config", "add-product-background-config", "add-face-swap-config", "add-seedream-edit", "add-layer-separation", "add-image-compare", "add-image-expand"],
+      actions: ["add-style-transfer-config", "add-material-transfer-config", "add-product-background-config", "add-seedream-edit", "add-layer-separation", "add-image-compare", "add-image-expand"],
+    },
+    {
+      label: "角色",
+      actions: ["add-character-turnaround", "add-character-environment", "add-face-swap-config", "add-video-replica"],
     },
     {
       label: "视频创作",
-      actions: ["add-director3d", "add-video-config", "add-video-replica"],
+      actions: ["add-director3d", "add-video-config"],
     },
     {
       label: "素材与预览",
@@ -88,6 +92,7 @@ test("creation sections keep favorites above the categorized node groups", () =>
     "文本与智能",
     "图片生成",
     "图片编辑",
+    "角色",
     "视频创作",
     "素材与预览",
   ]);

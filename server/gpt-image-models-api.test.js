@@ -105,7 +105,14 @@ function createApiHarness({ upstream, providerOverrides = {} } = {}) {
     Blob,
     FormData,
     Response,
-    fetch: async () => { throw new Error("Unexpected fetch: external network is disabled in this test"); },
+    fetch: async (url, options) => {
+      requests.push({ url, ...options });
+      events.push("upstream");
+      const result = upstream
+        ? await upstream(url, options)
+        : { ok: true, status: 200, text: JSON.stringify(IMAGE_RESULT) };
+      return { ok: result.ok, status: result.status, text: async () => result.text };
+    },
   }, { filename: serverPath });
   assert.equal(typeof handler, "function");
 
@@ -269,4 +276,30 @@ test("147 preserves explicitly configured legacy Image 2 instead of migrating it
   assert.deepEqual(result, { status: 200, body: IMAGE_RESULT });
   await assertUpstreamRequest(harness, "gpt-image-2", INPUT_MODES[0], body);
   assertSuccessfulBilling(harness, "gpt-image-2");
+});
+
+test("147 nano banana 2.1 uses chat completions and the Banana 2 canvas rate", async () => {
+  const model = "gemini-nano-banana-2.1";
+  const harness = createApiHarness({
+    providerOverrides: {
+      defaultModel: model,
+      models: [
+        { id: "gemini-3-pro-image-preview", label: "nano banana pro" },
+        { id: model, label: "nano banana 2.1" },
+      ],
+    },
+    upstream: (url, options) => {
+      assert.equal(url, "https://147ai.com/v1/chat/completions");
+      assert.equal(options.method, "POST");
+      const payload = JSON.parse(options.body);
+      assert.equal(payload.model, model);
+      assert.equal(payload.messages[0].content[0].text.includes("16:9"), true);
+      return { ok: true, status: 200, text: JSON.stringify({ choices: [{ message: { content: `![image](${IMAGE_URL})` } }] }) };
+    },
+  });
+  const result = await harness.generate(input(model, INPUT_MODES[0]));
+  assert.deepEqual(result, { status: 200, body: { data: [{ url: IMAGE_URL }] } });
+  assert.equal(harness.balance, 94);
+  assert.deepEqual(harness.transactions.map(({ delta, type }) => ({ delta, type })), [{ delta: -6, type: "spend" }]);
+  assert.deepEqual(harness.usage, [{ userId: 7, route: "images/generations", model, cost: 6, status: "ok" }]);
 });

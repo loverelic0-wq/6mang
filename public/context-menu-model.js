@@ -31,11 +31,20 @@
         { action: "add-style-transfer-config", label: "风格迁移" },
         { action: "add-material-transfer-config", label: "材质迁移" },
         { action: "add-product-background-config", label: "产品换背景" },
-        { action: "add-face-swap-config", label: "换脸" },
         { action: "add-seedream-edit", label: "精确图片编辑" },
         { action: "add-layer-separation", label: "智能图层分离" },
         { action: "add-image-compare", label: "图片对比" },
         { action: "add-image-expand", label: "图片扩展" },
+      ],
+    },
+    {
+      id: "character",
+      label: "角色",
+      items: [
+        { action: "add-character-turnaround", label: "角色三视图" },
+        { action: "add-character-environment", label: "角色环境适配" },
+        { action: "add-face-swap-config", label: "换脸" },
+        { action: "add-video-replica", label: "爆款视频复刻" },
       ],
     },
     {
@@ -44,7 +53,6 @@
       items: [
         { action: "add-director3d", label: "3D 导演台" },
         { action: "add-video-config", label: "视频生成配置" },
-        { action: "add-video-replica", label: "爆款视频复刻" },
       ],
     },
     {

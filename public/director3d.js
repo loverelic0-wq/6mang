@@ -63,6 +63,73 @@
     if (!camera(result)) throw new Error("运镜经过对焦点，请调整首尾机位的位置");
     return result;
   }
+  function validateMotion(motion) {
+    const start = camera(motion?.start), end = camera(motion?.end);
+    if (!start || !end) throw new Error("请先记录运镜起点和终点");
+    if (motion.kind !== "orbit") {
+      const a = start.position.map((v, i) => v - start.target[i]);
+      const d = end.position.map((v, i) => v - end.target[i] - a[i]);
+      const length = d.reduce((sum, v) => sum + v * v, 0);
+      const t = length ? clamp(-a.reduce((sum, v, i) => sum + v * d[i], 0) / length, 0, 1, 0) : 0;
+      if (Math.hypot(...a.map((v, i) => v + t * d[i])) < 0.01) throw new Error("运镜经过对焦点，请调整首尾机位的位置");
+    }
+  }
+  function exportSettings(duration, aspect) {
+    const ratio = String(aspect).split(":").map(Number);
+    const ar = ratio[0] / ratio[1];
+    if (!(ar >= 1 / 4 && ar <= 4) || !Number.isFinite(duration) || duration < 1 || duration > 30) throw new Error("预演时长需为 1–30 秒，请检查画面比例");
+    const width = ar >= 1 ? 960 : Math.round(960 * ar / 2) * 2;
+    const height = ar >= 1 ? Math.round(960 / ar / 2) * 2 : 960;
+    return { width, height, fps: 24, count: Math.round(duration * 24) };
+  }
+  function seedanceTarget(group) {
+    const entries = Object.entries(group?.items || {});
+    entries.sort(([a], [b]) => Number(b === group?.default) - Number(a === group?.default));
+    for (const [providerId, provider] of entries) {
+      if (!provider.configured) continue;
+      const models = [...(provider.models || [])].sort((a, b) => Number(b.id === provider.defaultModel) - Number(a.id === provider.defaultModel));
+      const model = models.find((m) => /^doubao-seedance-2-0(?:-fast|-mini)?-\d+$/i.test(m.id)
+        || (/cprt\./i.test(provider.baseUrl || "") && /^free-video-2\.0(?:-fast|-mini)?-multimodal-video$/i.test(m.id)));
+      if (model) return { providerId, model: model.id };
+    }
+    return null;
+  }
+  function previsSlots(slots) {
+    return slots.filter((slot) => slot.kind === "video" && (slot.edge?.data?.videoRole === "camera" || (slot.node?.data?.directorSource && slot.node.data.directorMotion)));
+  }
+  const defaultSceneRule = "保留预演中的主体，呈现真实材质与自然光影。";
+  function migratePromptNodes(workflow) {
+    const nodes = workflow.nodes || [], edges = workflow.edges || [];
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    const targets = new Set(edges.filter((edge) => {
+      const source = byId.get(edge.source), target = byId.get(edge.target);
+      return source?.type === "video" && source.data?.directorSource && source.data.directorMotion
+        && target?.type === "videoConfig" && target.data?.directorFollow !== false && target.data?.videoMode !== "first_last";
+    }).map((edge) => edge.target));
+    return { ...workflow, nodes: nodes.map((node) => {
+      if (node.type !== "text" || node.data?.directorPromptVersion || !["画面要求", "预演成片要求"].includes(node.data?.label)) return node;
+      const content = node.data.content;
+      if (typeof content !== "string" || !content.trimStart().startsWith(defaultSceneRule)) return node;
+      const outputs = edges.filter((edge) => edge.source === node.id);
+      // Shared prompts must retain their content for workflows without the built-in rule.
+      if (!outputs.length || outputs.some((edge) => !targets.has(edge.target))) return node;
+      return { ...node, data: { ...node.data, content: content.trimStart().slice(defaultSceneRule.length).trimStart(), directorPromptVersion: 1 } };
+    }) };
+  }
+  function cameraGuidance(slots) {
+    const refs = previsSlots(slots);
+    if (!refs.length) return "";
+    if (refs.length > 1) throw new Error("跟随预演镜头时只连接一段预演视频，请断开多余的预演连线");
+    const ref = refs[0];
+    return `以 ${ref.token} 为镜头设计依据，按时间顺序复现其起始机位、结束机位、拍摄方向、景别、主体在画面中的位置与占比，以及相机运动的路径、方向和节奏。保持连续镜头，不自行切镜或改成另一条运镜路线。\n默认成片要求：${defaultSceneRule}若画面要求或参考素材明确指定主体外观、环境或风格，则以指定内容为准。\n主体动作、场景和外观按画面要求呈现；主体运动时，仍保持预演中相机相对主体的视角变化。预演中的灰模材质、空白背景和辅助线不作为成片风格。${slots.some((slot) => slot.kind === "image") ? "参考图片按各自指定的主体或环境用途使用，不以静态图片构图替代预演的镜头变化。" : ""}`;
+  }
+  function videoPrompt(prompt, slots, data = {}) {
+    const refs = previsSlots(slots);
+    if (refs.length && data.videoMode === "first_last") throw new Error("首尾帧模式不会使用预演视频，请切回智能多参，或断开预演视频并连接首尾帧图片");
+    const guidance = data.directorFollow !== false ? cameraGuidance(slots) : "";
+    const scene = String(prompt || "").trim();
+    return guidance ? `【预演节点规则】\n${guidance}${scene ? `\n\n【画面要求】\n${scene}` : ""}` : prompt || "make animate";
+  }
   function scenePreset(kind = "studio") {
     const object = (kind, name, position, scale, color, rotation = [0, 0, 0]) => ({ kind, name, position, scale, color, rotation });
     const floor = object("plane", "摄影棚地面", [0, 0, 0], [4, 4, 4], "#d9d7d1", [-Math.PI / 2, 0, 0]);
@@ -82,13 +149,15 @@
   }
 
   // UI 只编排已有 Model3D 控制器；机位、运镜元数据与节点一起保存。
-  function mountUI({ overlay, controller, data, getAspect, applyAspect, syncCamera, save, exportFrames, notice, importModel, escapeHtml }) {
+  function mountUI({ overlay, controller, data, getAspect, applyAspect, syncCamera, save, exportFrames, exportVideo, notice, importModel, escapeHtml }) {
     let state = normalize(data);
     let raf = 0;
     let playing = false;
     let exporting = false;
     let disposed = false;
     let progress = 0;
+    let exportAbort = null;
+    let restoreExportView = null;
     const side = overlay.querySelector(".model3d-side");
     const body = overlay.querySelector(".model3d-body");
     const shelf = document.createElement("div");
@@ -113,7 +182,9 @@
         <label>时长 <input aria-label="运镜时长" data-director-field="duration" type="number" min="1" max="30" step="1"> 秒</label>
         <select aria-label="运镜速度" data-director-field="easing"><option value="smooth">缓入缓出</option><option value="linear">匀速</option></select>
         <button data-director="play">▶ 预览运镜</button><button data-director="reset-motion">回到起点</button>
-        <button class="director-primary" data-director="export">输出首尾帧</button>
+        <button data-director="export">输出首尾帧</button>
+        <button class="director-primary" data-director="export-video">输出预演视频</button>
+        <button data-director="cancel-export" hidden>取消导出</button>
       </div><div class="director-scrub"><span>起点</span><input aria-label="运镜进度" data-director-field="progress" type="range" min="0" max="1000" value="0"><output>0.0s / 4.0s</output><span>终点</span></div>
       <div class="director-motion-status" role="status"></div>`;
     body.after(timeline);
@@ -122,8 +193,10 @@
     const report = (text) => { timeline.querySelector(".director-motion-status").textContent = text; };
     function changed() { if (!disposed) save(copy(state)); }
     function stop() {
+      const wasPlaying = playing;
       cancelAnimationFrame(raf); raf = 0; playing = false;
-      controller.setInteractionEnabled(true);
+      // 外层 pointerdown 也会调用 stop；只有预览持有的锁才在此释放。
+      if (wasPlaying && !exporting) controller.setInteractionEnabled(true);
       button("play").textContent = "▶ 预览运镜";
     }
     function showCamera(shot) {
@@ -141,7 +214,7 @@
       field("easing").value = state.motion.easing;
       button("end").disabled = state.motion.kind !== "custom";
       const ready = Boolean(state.motion.start && state.motion.end);
-      for (const name of ["play", "reset-motion", "export"]) button(name).disabled = !ready || exporting;
+      for (const name of ["play", "reset-motion", "export", "export-video"]) button(name).disabled = !ready || exporting;
       field("progress").disabled = !ready || exporting;
       button("save-shot").disabled = state.shots.length >= 24;
       cameras.querySelector("[data-director-count]").textContent = `${state.shots.length} / 24`;
@@ -153,6 +226,7 @@
     }
     async function onClick(event) {
       const target = event.target.closest("[data-director]");
+      if (target?.dataset.director === "cancel-export") { exportAbort?.abort(); return; }
       if (!target || disposed || exporting) return;
       const action = target.dataset.director;
       try {
@@ -187,10 +261,10 @@
         } else if (action === "play") {
           if (playing) { stop(); return; }
           // 预先检查整条路径，避免相机穿过对焦点后翻转。
-          for (let i = 0; i <= 100; i++) sample(state.motion, i / 100);
+          validateMotion(state.motion);
           playing = true; controller.deselect(); controller.setInteractionEnabled(false);
           button("play").textContent = "Ⅱ 停止预览";
-          const started = performance.now();
+          const started = performance.now() - (progress >= 1 ? 0 : progress * state.motion.duration * 1000);
           const frame = (now) => {
             if (disposed || !playing) return;
             try {
@@ -201,7 +275,53 @@
             } catch (error) { stop(); report(error.message); }
           };
           raf = requestAnimationFrame(frame); return;
+        } else if (action === "export-video") {
+          if (typeof exportVideo !== "function") throw new Error("预演导出未就绪，请刷新页面");
+          validateMotion(state.motion);
+          const aspect = getAspect(), motion = { ...copy(state.motion), aspect, title: motions[state.motion.kind] };
+          const settings = exportSettings(motion.duration, aspect);
+          changed();
+          const current = controller.getShot(), mode = controller.getViewMode();
+          const disabled = [...overlay.querySelectorAll("button, input, select")].map((el) => [el, el.disabled]);
+          exporting = true; exportAbort = new AbortController();
+          const signal = exportAbort.signal;
+          restoreExportView = () => { controller.setShot(current); controller.setViewMode(mode); syncCamera(); };
+          disabled.forEach(([el]) => { if (el.dataset.m3d !== "cancel" && el.dataset.director !== "cancel-export") el.disabled = true; });
+          button("cancel-export").hidden = false;
+          controller.setInteractionEnabled(false);
+          try {
+            const frames = [];
+            let bytes = 0;
+            for (let i = 0; i < settings.count; i++) {
+              signal.throwIfAborted();
+              controller.setShot(sample(motion, i / (settings.count - 1)));
+              const frame = controller.captureCanvas(settings.width / settings.height, settings).toDataURL("image/jpeg", 0.88);
+              bytes += frame.length;
+              if (bytes > 48 * 1024 * 1024) throw new Error("预演素材过大，请缩短运镜时长后重试");
+              frames.push(frame);
+              report(`正在渲染预演 ${i + 1} / ${settings.count} 帧`);
+              // 让界面和取消按钮能及时响应；时间由帧编号决定，不依赖机器帧率。
+              await new Promise((resolve) => setTimeout(resolve, 0));
+            }
+            restoreExportView(); restoreExportView = null;
+            signal.throwIfAborted(); report("正在编码 MP4…");
+            await exportVideo({ ...settings, frames }, motion, signal);
+            if (!disposed) notice("预演视频已输出到画布");
+          } catch (error) {
+            if (!disposed) notice(signal.aborted ? "已取消预演导出" : `预演导出失败：${error.message}`);
+          } finally {
+            if (!disposed) {
+              restoreExportView?.();
+              controller.setInteractionEnabled(true);
+              disabled.forEach(([el, value]) => { el.disabled = value; });
+              button("cancel-export").hidden = true;
+            }
+            exporting = false; exportAbort = null; restoreExportView = null;
+            if (!disposed) refresh();
+          }
+          return;
         } else if (action === "export") {
+          validateMotion(state.motion);
           const current = controller.getShot();
           const currentMode = controller.getViewMode();
           exporting = true; refresh(); report("正在保存首尾帧…");
@@ -245,9 +365,11 @@
     refresh();
     return {
       getData: () => copy(state),
+      isBusy: () => exporting,
+      cancelExport() { exportAbort?.abort(); restoreExportView?.(); restoreExportView = null; },
       stop,
-      dispose() { disposed = true; stop(); overlay.removeEventListener("click", onClick); overlay.removeEventListener("input", onInput); },
+      dispose() { exportAbort?.abort(); disposed = true; stop(); overlay.removeEventListener("click", onClick); overlay.removeEventListener("input", onInput); },
     };
   }
-  return { camera, normalize, endpoint, sample, scenePreset, initialView, mountUI };
+  return { camera, normalize, endpoint, sample, validateMotion, exportSettings, seedanceTarget, previsSlots, migratePromptNodes, cameraGuidance, videoPrompt, scenePreset, initialView, mountUI };
 });

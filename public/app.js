@@ -691,7 +691,7 @@ function ensureNodeProvider(node) {
     Object.assign(node.data, window.VideoReplica.selectModel(getProviderGroup("video"), node.data));
     return;
   }
-  const kindMap = { llmConfig: "chat", storyboardAssistant: "chat", promptOptimizer: "chat", imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", styleTransferConfig: "image", materialTransferConfig: "image", productBackgroundConfig: "image", faceSwapConfig: "image", seedreamEdit: "image", layerSeparation: "image", videoConfig: "video" };
+  const kindMap = { llmConfig: "chat", storyboardAssistant: "chat", promptOptimizer: "chat", imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", styleTransferConfig: "image", materialTransferConfig: "image", productBackgroundConfig: "image", characterTurnaroundConfig: "image", characterEnvironmentConfig: "image", faceSwapConfig: "image", seedreamEdit: "image", layerSeparation: "image", videoConfig: "video" };
   const kind = kindMap[node.type];
   if (!kind) return;
   if (node.type === "seedreamEdit" || node.type === "layerSeparation") {
@@ -819,7 +819,7 @@ const nodeSizes = {
   promptOptimizer: { width: 320, height: 280 },
   imageConfig: { width: 300, height: 260 },
   image: { width: 260, height: 350 },
-  videoConfig: { width: 300, height: 280 },
+  videoConfig: { width: 360, height: 280 },
   videoReplicaConfig: { width: 360, height: 560 },
   video: { width: 300, height: 250 },
   storyboardConfig: { width: 360, height: 520 },
@@ -829,6 +829,8 @@ const nodeSizes = {
   styleTransferConfig: { width: 320, height: 310 },
   materialTransferConfig: { width: 330, height: 350 },
   productBackgroundConfig: { width: 340, height: 380 },
+  characterTurnaroundConfig: { width: 350, height: 430 },
+  characterEnvironmentConfig: { width: 350, height: 430 },
   faceSwapConfig: { width: 300, height: 250 },
   seedreamEdit: { width: 330, height: 420 },
   layerSeparation: { width: 320, height: 330 },
@@ -856,6 +858,15 @@ let templateLibrary = loadTemplateLibrary();
 let projectLibrary = loadProjectLibrary();
 let externalDragDepth = 0;
 let previewImageSource = "";
+// 交互期间保留节点/媒体 DOM；几何信息只在内容或尺寸变化后重新测量。
+const renderedNodes = new Map();
+const renderedNodeSizes = new Map();
+const inputPortOffsets = new Map();
+const renderedEdges = new Map();
+let canvasFrame = null;
+let pendingCanvasMove = null;
+let viewSaveTimer = null;
+const dirtyGeometryNodes = new Set();
 
 function defaultState() {
   const textId = makeId();
@@ -926,11 +937,11 @@ function loadState() {
 
 function normalizeState(next) {
   const nodes = Array.isArray(next.nodes) ? next.nodes.map(migrateVideoConfigNode).map(restoreVideoReplicaTaskNode) : next.nodes;
-  return migrateImageInputSlots({
+  return window.Director3D.migratePromptNodes(migrateImageInputSlots({
     ...next,
     nodes,
     groups: Array.isArray(next.groups) ? next.groups : [],
-  });
+  }));
 }
 
 function restoreVideoReplicaTaskNode(node) {
@@ -1640,7 +1651,7 @@ async function saveSettingsDraft() {
 // ===== 快速切换 API 平台 =====
 const NODE_KIND_MAP_CLIENT = {
   llmConfig: "chat", storyboardAssistant: "chat", promptOptimizer: "chat",
-  imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", styleTransferConfig: "image", materialTransferConfig: "image", productBackgroundConfig: "image", faceSwapConfig: "image", seedreamEdit: "image", layerSeparation: "image",
+  imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", styleTransferConfig: "image", materialTransferConfig: "image", productBackgroundConfig: "image", characterTurnaroundConfig: "image", characterEnvironmentConfig: "image", faceSwapConfig: "image", seedreamEdit: "image", layerSeparation: "image",
   videoConfig: "video",
 };
 
@@ -1741,6 +1752,8 @@ async function switchKindProvider(kind, providerId) {
 }
 
 function saveState() {
+  clearTimeout(viewSaveTimer);
+  viewSaveTimer = null;
   let serialized;
   try {
     serialized = JSON.stringify(state);
@@ -1918,13 +1931,13 @@ function sanitizeWorkflowState(workflow, options = {}) {
       }
     : { x: 160, y: 120, zoom: 1 };
 
-  return migrateImageInputSlots({
+  return window.Director3D.migratePromptNodes(migrateImageInputSlots({
     nodes,
     edges,
     groups,
     view,
     theme: themeStyles.normalizeTheme(source.theme),
-  });
+  }));
 }
 
 function loadProjectLibrary() {
@@ -2082,6 +2095,7 @@ function renderHistoryPanel() {
           ${item.prompt ? `<div class="history-prompt" title="${escapeHtml(item.prompt)}">${escapeHtml(item.prompt)}</div>` : ""}
           <div class="history-actions">
             <button class="ghost-small" data-history-action="preview">预览</button>
+            <button class="ghost-small" data-history-action="download">下载</button>
             <button class="ghost-small" data-history-action="add-to-canvas">放入画布</button>
             <button class="ghost-small danger" data-history-action="delete">删除</button>
           </div>
@@ -2139,6 +2153,10 @@ historyListEl.addEventListener("click", (event) => {
       const project = getActiveProject();
       window.open(project ? historyVideoSrc(project, item) : item.url, "_blank", "noopener");
     }
+  } else if (action === "download") {
+    const project = getActiveProject();
+    const source = item.type === "video" && project ? historyVideoSrc(project, item) : item.url;
+    void downloadMediaSource(source, item.type, `6mang-${item.type}-${item.id.slice(0, 8)}`, event.target.closest("button"));
   } else if (action === "add-to-canvas") {
     void addHistoryEntryToCanvas(itemId);
   } else if (action === "delete") {
@@ -2574,22 +2592,29 @@ function setView(nextView) {
     y: nextView.y,
     zoom: clamp(nextView.zoom, 0.12, 2.2),
   };
-  renderTransforms();
-  saveState();
+  scheduleCanvasFrame();
+  clearTimeout(viewSaveTimer);
+  viewSaveTimer = setTimeout(saveState, 200);
 }
 
 function render() {
+  dirtyGeometryNodes.clear();
+  renderedNodes.clear();
+  renderedNodeSizes.clear();
+  inputPortOffsets.clear();
   world.innerHTML = "";
   state.nodes.forEach((node) => {
     try {
-      world.append(renderNode(node));
+      const element = renderNode(node);
+      world.append(element);
+      renderedNodes.set(node.id, element);
     } catch (error) {
       console.error("renderNode 失败，已跳过该节点", node?.id, node?.type, error);
     }
   });
-  state.groups.forEach((group) => world.append(renderGroup(group)));
   renderTransforms();
   renderEdges();
+  state.groups.forEach((group) => world.append(renderGroup(group)));
   hydrateAssetImages();
   setupExpandStages();
   setupCompareStages();
@@ -2600,50 +2625,80 @@ function render() {
 function renderTransforms() {
   const { x, y, zoom } = state.view;
   const transform = `translate(${x}px, ${y}px) scale(${zoom})`;
-  world.style.transform = transform;
-  edgeLayer.style.transform = transform;
-  grid.style.transform = transform;
-  grid.style.backgroundPosition = `${x}px ${y}px`;
-  zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
+  if (world.style.transform !== transform) world.style.transform = transform;
+  if (edgeLayer.style.transform !== transform) edgeLayer.style.transform = transform;
+  if (grid.style.transform !== transform) grid.style.transform = transform;
+  const backgroundPosition = `${x}px ${y}px`;
+  if (grid.style.backgroundPosition !== backgroundPosition) grid.style.backgroundPosition = backgroundPosition;
+  const label = `${Math.round(zoom * 100)}%`;
+  if (zoomLabel.textContent !== label) zoomLabel.textContent = label;
 }
 
-function renderEdges() {
-  edgeLayer.innerHTML = "";
-  const inputPoints = layoutImageInputPorts();
-
+function renderEdges({ measure = true, nodeIds = null } = {}) {
+  if (measure) { renderTransforms(); layoutImageInputPorts(nodeIds); }
+  const nodes = new Map(state.nodes.map((node) => [node.id, node]));
+  const liveEdges = new Set();
   state.edges.forEach((edge) => {
-    const source = getNode(edge.source);
-    const target = getNode(edge.target);
+    const source = nodes.get(edge.source);
+    const target = nodes.get(edge.target);
     if (!source || !target) return;
-
+    liveEdges.add(edge.id);
+    if (nodeIds && !nodeIds.has(edge.source) && !nodeIds.has(edge.target) && renderedEdges.has(edge.id)) return;
     const sourceSize = getRenderedNodeSize(source);
     const targetSize = getRenderedNodeSize(target);
     const sx = source.position.x + sourceSize.width + 0.5;
     const sy = source.position.y + sourceSize.height / 2;
-    const targetPoint = inputPoints.get(edge.id);
-    const tx = targetPoint?.x ?? target.position.x + 0.5;
-    const ty = targetPoint?.y ?? target.position.y + targetSize.height / 2;
-    appendInteractiveEdge(edge, sx, sy, tx, ty);
+    const offset = inputPortOffsets.get(edge.id);
+    const tx = target.position.x + 0.5;
+    const ty = target.position.y + (offset ?? targetSize.height / 2);
+    const d = getEdgePathD(sx, sy, tx, ty);
+    let element = renderedEdges.get(edge.id);
+    if (!element) {
+      element = appendInteractiveEdge(edge, sx, sy, tx, ty);
+      renderedEdges.set(edge.id, element);
+    } else {
+      for (const path of element.children) {
+        if (path.getAttribute("d") !== d) path.setAttribute("d", d);
+      }
+    }
   });
-
+  for (const [id, element] of renderedEdges) {
+    if (!liveEdges.has(id)) { element.remove(); renderedEdges.delete(id); }
+  }
   renderConnectionPreview();
 }
 
 // The rows can move when model controls, card size or zoom change.
 // Keep ports outside the clipped card and align them to the actual row centres.
-function layoutImageInputPorts() {
+function layoutImageInputPorts(nodeIds = null) {
   const points = new Map();
-  world.querySelectorAll('.node[data-type="imageConfig"]').forEach((element) => {
+  const portUpdates = [];
+  if (!nodeIds) inputPortOffsets.clear();
+  // 先完成全部读取，再统一写样式，避免每个端口触发一次强制布局。
+  for (const [id, element] of renderedNodes) {
+    if (nodeIds && !nodeIds.has(id)) continue;
+    const card = element.querySelector(".node-card");
+    renderedNodeSizes.set(id, { width: card.offsetWidth, height: card.offsetHeight });
+    if (element.dataset.type !== "imageConfig" && element.dataset.type !== "videoConfig") continue;
     const top = element.getBoundingClientRect().top;
     const rows = [...element.querySelectorAll(".image-input-row")];
     element.querySelectorAll(".node-port.input").forEach((port, index) => {
       const row = rows[index];
       if (!row) return;
       const rect = row.getBoundingClientRect();
-      port.style.top = `${(rect.top + rect.height / 2 - top) / state.view.zoom}px`;
-      if (port.dataset.inputEdgeId) points.set(port.dataset.inputEdgeId, getPortWorldPoint(port));
+      const offset = (rect.top + rect.height / 2 - top) / state.view.zoom;
+      portUpdates.push([port, `${offset}px`]);
+      if (port.dataset.inputEdgeId) inputPortOffsets.set(port.dataset.inputEdgeId, offset);
     });
-  });
+  }
+  for (const [port, top] of portUpdates) {
+    if (port.style.top !== top) port.style.top = top;
+  }
+  for (const edge of state.edges) {
+    const offset = inputPortOffsets.get(edge.id);
+    const node = offset === undefined ? null : getNode(edge.target);
+    if (node) points.set(edge.id, { x: node.position.x + 0.5, y: node.position.y + offset });
+  }
   return points;
 }
 
@@ -2661,7 +2716,9 @@ function highlightImageInput(edgeId) {
 }
 
 function getRenderedNodeSize(node) {
-  const element = [...world.querySelectorAll(".node")].find((item) => item.dataset.id === node.id);
+  const cached = renderedNodeSizes.get(node.id);
+  if (cached) return cached;
+  const element = renderedNodes.get(node.id);
   const card = element?.querySelector(".node-card");
   const stored = getNodeSize(node);
   return {
@@ -2690,6 +2747,7 @@ function appendInteractiveEdge(edge, sx, sy, tx, ty) {
   group.append(createEdgePath(d, "edge-path"));
   group.append(createEdgePath(d, "edge-hit"));
   edgeLayer.append(group);
+  return group;
 }
 
 function appendEdgePath(sx, sy, tx, ty, className = "edge-path") {
@@ -2698,14 +2756,17 @@ function appendEdgePath(sx, sy, tx, ty, className = "edge-path") {
 }
 
 function renderConnectionPreview() {
-  if (!pendingConnection || !connectionPreviewPoint) return;
+  const preview = edgeLayer.querySelector(".edge-preview");
+  if (!pendingConnection || !connectionPreviewPoint) { preview?.remove(); return; }
   const source = getNode(pendingConnection);
   if (!source) return;
 
   const sourceSize = getRenderedNodeSize(source);
   const sx = source.position.x + sourceSize.width + 0.5;
   const sy = source.position.y + sourceSize.height / 2;
-  appendEdgePath(sx, sy, connectionPreviewPoint.x, connectionPreviewPoint.y, "edge-path edge-preview");
+  const d = getEdgePathD(sx, sy, connectionPreviewPoint.x, connectionPreviewPoint.y);
+  if (preview) preview.setAttribute("d", d);
+  else appendEdgePath(sx, sy, connectionPreviewPoint.x, connectionPreviewPoint.y, "edge-path edge-preview");
 }
 
 function renderGroup(group) {
@@ -2848,15 +2909,15 @@ let nodeResizeObserver = null;
 function observeNodeResizesForGroups() {
   if (typeof ResizeObserver === "undefined") return;
   if (nodeResizeObserver) nodeResizeObserver.disconnect();
-  let scheduled = false;
-  nodeResizeObserver = new ResizeObserver(() => {
-    if (scheduled) return;
-    scheduled = true;
-    requestAnimationFrame(() => {
-      scheduled = false;
-      relayoutGroups();
-      renderEdges();
-    });
+  nodeResizeObserver = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      const id = entry.target.closest(".node")?.dataset.id;
+      const cached = renderedNodeSizes.get(id);
+      const box = entry.borderBoxSize?.[0];
+      if (box && cached && Math.round(box.inlineSize) === cached.width && Math.round(box.blockSize) === cached.height) continue;
+      if (id) dirtyGeometryNodes.add(id);
+    }
+    if (dirtyGeometryNodes.size) scheduleCanvasFrame();
   });
   world.querySelectorAll(".node .node-card").forEach((el) => nodeResizeObserver.observe(el));
 }
@@ -2870,7 +2931,7 @@ function getGroupAtPoint(point) {
 }
 
 function getNodeSize(node) {
-  const fallback = nodeSizes[node?.type] || { width: 260, height: 220 };
+  const fallback = node?.data?.director ? { width: 340, height: 340 } : nodeSizes[node?.type] || { width: 260, height: 220 };
   const stored = node?.type === "layerGroup"
     ? window.SeedreamTools.layerGroupLayout(node.data, fallback)
     : { nodeWidth: node?.data?.width, nodeHeight: node?.data?.height };
@@ -2896,6 +2957,7 @@ function renderNode(node) {
   wrap.className = "node";
   wrap.dataset.id = node.id;
   wrap.dataset.type = node.type;
+  if (node.data.director) wrap.dataset.director = "true";
   wrap.style.setProperty("--x", `${node.position.x}px`);
   wrap.style.setProperty("--y", `${node.position.y}px`);
   wrap.style.setProperty("--node-width", `${size.width}px`);
@@ -2951,9 +3013,14 @@ function renderNode(node) {
   }
 
   wrap.append(card, createNodePort("output"), resizeHandle);
-  if (node.type === "imageConfig") {
+  if (node.type === "imageConfig" || node.type === "videoConfig") {
     card.querySelectorAll(".image-input-row").forEach((row) => {
       const port = createNodePort("input");
+      if (row.dataset.videoInputRole) {
+        port.dataset.videoInputRole = row.dataset.videoInputRole;
+        port.title = `${row.dataset.inputLabel} · 拖入素材连接`;
+        port.setAttribute("aria-label", `${row.dataset.inputLabel}输入连接点`);
+      }
       const edgeId = row.dataset.inputEdgeId;
       if (edgeId) {
         port.dataset.inputEdgeId = edgeId;
@@ -2965,10 +3032,10 @@ function renderNode(node) {
           element.addEventListener("focusin", () => highlightImageInput(edgeId));
           element.addEventListener("focusout", () => highlightImageInput(null));
         }
-      } else {
+      } else if (!row.dataset.videoInputRole || row.dataset.videoInputRole === "reference") {
         port.classList.add("input-add");
         port.textContent = "+";
-        port.title = "拖入提示词或图片，添加一路输入";
+        port.title = row.dataset.videoInputRole ? "拖入图片、视频或提示词，添加一路输入" : "拖入提示词或图片，添加一路输入";
         port.setAttribute("aria-label", "添加输入连接点");
       }
       wrap.append(port);
@@ -2977,6 +3044,96 @@ function renderNode(node) {
     wrap.append(createNodePort("input"));
   }
   return wrap;
+}
+
+function getVideoInputRows(targetId) {
+  const refs = new Map(getReferenceMaterialSlots(targetId).map((slot) => [slot.edge.id, slot]));
+  const inputs = state.edges.filter((edge) => edge.target === targetId)
+    .map((edge) => refs.get(edge.id) || { edge, node: getNode(edge.source) }).filter((slot) => slot.node);
+  return window.VideoInputs.describe(inputs, getVideoMode(getNode(targetId)?.data));
+}
+
+function renderVideoGenerationInputs(node) {
+  const rows = getVideoInputRows(node.id).map((slot) => {
+    const source = slot.node?.data?.url;
+    const ready = Boolean(slot.node && (window.VideoInputs.kind(slot.node) === "prompt" || (typeof source === "string" && source && !slot.node.data.loading)));
+    const sourceLabel = slot.node?.data?.label || slot.hint;
+    const imageSource = slot.node && window.VideoInputs.kind(slot.node) === "image" ? source : slot.node?.data?.poster;
+    const thumbnail = typeof imageSource === "string" && imageSource
+      ? `<img class="image-input-thumbnail" src="${escapeHtml(imageDisplaySource(imageSource) || transparentPixel)}" data-asset-url="${escapeHtml(imageSource)}" alt="" draggable="false">`
+      : `<span class="image-input-icon" aria-hidden="true">${escapeHtml(slot.icon)}</span>`;
+    return `<div class="image-input-row video-input-row ${ready ? "ready" : ""} ${slot.key === "add" ? "video-input-add" : ""}" data-video-input-role="${slot.role}" data-input-edge-id="${escapeHtml(slot.edge?.id || "")}" data-input-label="${escapeHtml(slot.label)}" data-source-label="${escapeHtml(sourceLabel)}">
+      <button class="video-input-content" data-node-action="video-input" title="${slot.node ? "查看或替换" : "添加"}${escapeHtml(slot.label)}">
+        ${thumbnail}<span class="video-input-copy"><strong>${escapeHtml(slot.label)}</strong><small>${escapeHtml(sourceLabel)}</small></span>
+      </button>
+      ${slot.token ? `<button class="video-input-token" data-node-action="insert-ref-mention" data-ref-token="${escapeHtml(slot.token)}" title="插入素材编号">${escapeHtml(slot.token)}</button>` : ""}
+      ${slot.edge ? `<button class="video-input-remove" data-node-action="disconnect-video-input" aria-label="断开${escapeHtml(slot.label)}" title="断开此输入">×</button>` : `<span class="video-input-empty">${slot.key === "add" ? "+" : slot.role === "first" ? "必填" : "可选"}</span>`}
+    </div>`;
+  }).join("");
+  return `<div class="image-inputs video-inputs"><div class="image-input-heading">画面输入<span>每个插槽对应一条连线</span></div>${rows}</div>`;
+}
+
+function connectVideoInput(sourceId, targetId, requestedRole, replaceEdgeId = "") {
+  const source = getNode(sourceId), target = getNode(targetId);
+  if (!source || target?.type !== "videoConfig" || sourceId === targetId) return false;
+  if (!window.VideoInputs.accepts(requestedRole, source)) {
+    showToast(`${window.VideoInputs.roles[requestedRole]?.label || "此插槽"}需要${requestedRole === "camera" ? "视频" : requestedRole === "prompt" ? "文本" : "图片"}素材`);
+    return false;
+  }
+  const role = requestedRole === "reference"
+    ? window.VideoInputs.defaultRole(source, getVideoInputRows(targetId).filter((row) => row.edge), getVideoMode(target.data)) : requestedRole;
+  const row = getVideoInputRows(targetId).find((r) => replaceEdgeId ? r.edge?.id === replaceEdgeId : requestedRole !== "reference" && r.role === role);
+  const previous = row?.edge;
+  const existing = state.edges.find((e) => e.source === sourceId && e.target === targetId);
+  if (existing && existing.id === previous?.id && existing.data?.videoRole === role) return false;
+  commitHistory();
+  state.edges = state.edges.filter((e) => e.id !== previous?.id && e.id !== existing?.id);
+  state.edges.push({ id: existing?.id || makeId(), source: sourceId, target: targetId,
+    type: window.VideoInputs.kind(source) === "prompt" ? "promptOrder" : "input",
+    data: { label: window.VideoInputs.roles[role].label, videoRole: role } });
+  saveState(); render();
+  showToast(`已连接${window.VideoInputs.roles[role].label}`);
+  return true;
+}
+
+function handleVideoInputClick(configId, rowElement) {
+  if (!rowElement) return;
+  if (pendingConnection) { finishConnection(configId, rowElement); return; }
+  const config = getNode(configId);
+  const role = rowElement.dataset.videoInputRole;
+  const edgeId = rowElement.dataset.inputEdgeId || "";
+  if (!config || !window.VideoInputs.roles[role]) return;
+  if (role === "prompt") {
+    const previous = state.edges.find((edge) => edge.id === edgeId);
+    const id = previous?.source || addNode("text", { x: config.position.x - 380, y: config.position.y + 360 }, { label: "画面要求", content: "" });
+    if (!previous) connectVideoInput(id, configId, "prompt");
+    setSelectedNodes([id]);
+    const source = getNode(id), size = getNodeSize(source), rect = viewport.getBoundingClientRect();
+    setView({ ...state.view, x: rect.width / 2 - (source.position.x + size.width / 2) * state.view.zoom, y: rect.height / 2 - (source.position.y + size.height / 2) * state.view.zoom });
+    world.querySelector(`.node[data-id="${CSS.escape(id)}"] textarea`)?.focus();
+    return;
+  }
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = role === "camera" ? "video/mp4,video/webm,video/quicktime" : role === "reference" ? "image/png,image/jpeg,image/webp,video/mp4,video/webm" : "image/png,image/jpeg,image/webp";
+  const projectId = projectLibrary.activeProjectId;
+  input.addEventListener("change", async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    const type = file.type.startsWith("video/") ? "video" : file.type.startsWith("image/") ? "image" : "";
+    if (!type || !window.VideoInputs.accepts(role, { type })) { showToast("文件类型不适合这个插槽"); return; }
+    try {
+      const url = type === "video" ? await persistVideoBlob(file) : await persistImageBlob(file);
+      if (projectLibrary.activeProjectId !== projectId || !getNode(configId)) return;
+      // If this slot changed while the picker was open, retain the user's newer connection.
+      const current = getVideoInputRows(configId).find((r) => r.role === role);
+      if (role !== "reference" && (current?.edge?.id || "") !== edgeId) { showToast("此插槽已更新，请重新选择素材"); return; }
+      const index = ["camera", "environment", "subject", "prompt"].indexOf(role);
+      const id = addNode(type, { x: config.position.x - 390, y: config.position.y + Math.max(0, index) * 350 }, { label: `${window.VideoInputs.roles[role].label} · ${file.name}`, url });
+      connectVideoInput(id, configId, role, edgeId);
+    } catch (error) { showToast(`素材载入失败：${error.message}`); }
+  });
+  input.click();
 }
 
 function createNodePort(type) {
@@ -3013,12 +3170,42 @@ function renderImageGenerationInputs(node) {
   </div>`;
 }
 
+function renderDirectorCard(node) {
+  const data = node.data;
+  const director = window.Director3D.normalize(data.directorData);
+  const motion = director.motion;
+  const motionLabel = { dollyIn: "推进", dollyOut: "拉远", truck: "横移", crane: "升降", orbit: "环绕", custom: "自定义运镜" }[motion.kind];
+  const video = outgoingNodes(node.id, ["video"]).filter((n) => n.data.directorSource === node.id && typeof n.data.url === "string").at(-1);
+  const poster = data.directorPoster || data.url || video?.data.poster;
+  let visual;
+  if (typeof poster === "string" && poster) {
+    visual = `<img class="generated-image" src="${escapeHtml(imageDisplaySource(poster) || transparentPixel)}" data-asset-url="${escapeHtml(poster)}" alt="导演台场景取景" draggable="false">`;
+  } else if (video) {
+    const source = imageDisplaySource(video.data.url);
+    visual = `<video class="result-video" ${source ? `src="${escapeHtml(source)}"` : ""} data-asset-url="${escapeHtml(video.data.url)}" preload="metadata" muted playsinline aria-label="最近一次预演"></video>`;
+  } else {
+    visual = `<div class="director-card-empty"><svg viewBox="0 0 280 150" aria-hidden="true"><path d="M20 112 140 54 260 112 140 148Z M60 92 180 130 M100 73 220 111 M60 130 180 73 M100 148 220 92"/><path class="director-card-object" d="m112 63 28-14 28 14v43l-28 14-28-14Z M112 63l28 15 28-15 M140 78v42"/><path d="m41 45 21-10 22 11v23l-22 10-21-11Z M84 51l16-9v27l-16-8"/></svg><span>布置场景，设计你的镜头</span></div>`;
+  }
+  const models = getModel3dEntries(data);
+  const objects = models.length + (data.view?.primitives?.length || 0);
+  const ready = Boolean(motion.start && motion.end);
+  const shots = director.shots;
+  return `<div class="director-card-kicker"><span>场景与镜头</span><span class="director-card-state ${ready ? "ready" : ""}">${ready ? "运镜已就绪" : "待设置运镜"}</span></div>
+    <button class="director-card-preview" data-node-action="model3d-open" aria-label="打开导演台编辑场景">
+      ${visual}<span class="director-card-frame"></span><span class="director-card-aspect">${escapeHtml(data.view?.aspect || "16:9")}</span><span class="director-card-preview-action">进入取景器 ↗</span>
+    </button>
+    <div class="director-card-motion"><strong>${escapeHtml(motionLabel)}</strong><span>${motion.duration}s <i>·</i> ${motion.easing === "linear" ? "匀速" : "缓入缓出"}</span></div>
+    <div class="director-card-stats"><span><b>${objects}</b> 场景对象</span><span><b>${shots.length}</b> 已存机位</span><span>${video ? "已输出预演" : "尚未输出预演"}</span></div>
+    ${shots.length ? `<div class="director-card-shots">${shots.slice(0, 3).map((shot, i) => `<span title="${escapeHtml(shot.name)}">${String(i + 1).padStart(2, "0")} ${escapeHtml(shot.name)}</span>`).join("")}${shots.length > 3 ? `<span>+${shots.length - 3}</span>` : ""}</div>` : ""}
+    <button class="node-button director-card-open" data-node-action="model3d-open">编辑场景与运镜</button>`;
+}
+
 function renderNodeBody(node) {
   if (node.type === "text") {
     return `
       <div class="prompt-editor">
         <div class="prompt-highlight" aria-hidden="true">${renderPromptHighlight(node)}</div>
-        <textarea data-field="content" spellcheck="false">${escapeHtml(node.data.content || "")}</textarea>
+        <textarea data-field="content" spellcheck="false" ${node.data.directorPromptVersion ? 'placeholder="描述场景、动作或风格；预演规则会自动应用"' : ""}>${escapeHtml(node.data.content || "")}</textarea>
         <div class="prompt-mention-menu" hidden></div>
       </div>
     `;
@@ -3156,6 +3343,7 @@ function renderNodeBody(node) {
     const strength = window.MaterialTransfer.normalizeStrength(node.data.strength);
     return `
       <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", node.data.providerId, node.data.model, "image_to_image")}</select></div>
+      ${renderReferenceImageSizeControl(node)}
       <div class="node-row"><span>迁移强度</span><select data-field="strength">${optionPairs(window.MaterialTransfer.strengthOptions, strength)}</select></div>
       <div class="node-row"><span>材质说明</span><input type="text" data-field="materialHint" placeholder="可留空自动识别。例：温润半透明白玉" value="${escapeHtml(node.data.materialHint || "")}"></div>
       <div class="node-row"><span>额外要求</span><input type="text" data-field="extra" placeholder="可留空。例：只替换盔甲，皮肤不变" value="${escapeHtml(node.data.extra || "")}"></div>
@@ -3191,10 +3379,56 @@ function renderNodeBody(node) {
         ${renderSlot(background, "background", "②背景图")}
       </div>
       <div class="node-row"><span>输出比例</span><select data-field="aspectSource">${optionPairs([["product", "跟随产品图"], ["background", "跟随背景图"]], window.ProductBackground.normalizeAspectSource(node.data.aspectSource))}</select></div>
+      ${renderReferenceImageSizeControl(node)}
       <div class="node-row"><span>补充要求</span><input type="text" data-field="extra" placeholder="可留空。例：产品放在桌面中央" value="${escapeHtml(node.data.extra || "")}"></div>
       <div class="node-tip">也可连入两张图片：①产品，②背景。一次编辑完成换背景与光影统一，尽量保留外观、文字和材质细节。</div>
       ${inputError ? `<div class="node-inline-error">${escapeHtml(inputError)}</div>` : ""}
       <button class="node-button" data-node-action="generate-product-background" ${ready && !busy ? "" : "disabled"}>${busy ? "正在换背景…" : "更换背景"}</button>
+    `;
+  }
+
+  if (node.type === "characterTurnaroundConfig") {
+    const d = node.data;
+    const refs = getImageReferenceSlots(node.id);
+    const hasRef = Boolean(refs.some((slot) => slot.node?.data?.url));
+    const ready = Boolean(String(d.characterDescription || "").trim()) || Boolean(connectedCharacterPrompt(node.id)) || hasRef;
+    return `
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", d.providerId, d.model, "image_to_image")}</select></div>
+      ${renderImageSizeControl(normalizeModelValue("image", d.model) || getDefaultModel("image"), d)}
+      <div class="node-row node-row-col"><span>角色设定</span><textarea data-field="characterDescription" placeholder="人物年龄、体型、发型、面部特征与身份">${escapeHtml(d.characterDescription || "")}</textarea></div>
+      <div class="node-row"><span>服装与道具</span><input type="text" data-field="outfit" placeholder="服装、鞋靴、武器或配饰" value="${escapeHtml(d.outfit || "")}"></div>
+      <div class="node-row"><span>画面风格</span><input type="text" data-field="style" placeholder="二次元、写实、黏土、厚涂……" value="${escapeHtml(d.style || "")}"></div>
+      <div class="node-row node-row-col"><span>补充要求</span><textarea data-field="extra" placeholder="保持脸部、服装和比例一致；白色背景，清晰展示结构">${escapeHtml(d.extra || "")}</textarea></div>
+      ${renderImageGenerationInputs(node)}
+      <div class="node-indicators character-slots">
+        <span class="indicator ${ready ? "ready" : ""}">角色设定 ${ready ? "✓" : "○"}</span>
+        <span class="indicator ${hasRef ? "ready" : ""}">参考图 ${hasRef ? refs.length : "○"}</span>
+      </div>
+      <div class="node-tip">生成正面、侧面、背面三视图；可连接角色参考图锁定外观。</div>
+      <button class="node-button" data-node-action="generate-character-turnaround" ${ready ? "" : "disabled"}>生成角色三视图</button>
+    `;
+  }
+
+  if (node.type === "characterEnvironmentConfig") {
+    const d = node.data;
+    const refs = getImageReferenceSlots(node.id);
+    const hasCharacter = Boolean(refs[0]?.node?.data?.url);
+    const ready = hasCharacter && Boolean(String(d.environment || "").trim());
+    return `
+      <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("image", d.providerId, d.model, "image_to_image")}</select></div>
+      ${renderImageSizeControl(normalizeModelValue("image", d.model) || getDefaultModel("image"), d)}
+      <div class="node-row node-row-col"><span>环境描述</span><textarea data-field="environment" placeholder="森林营地、雨夜街道、飞船驾驶舱……">${escapeHtml(d.environment || "")}</textarea></div>
+      <div class="node-row"><span>角色动作</span><input type="text" data-field="interaction" placeholder="站在路灯下，手持雨伞，观察远处" value="${escapeHtml(d.interaction || "")}"></div>
+      <div class="node-row"><span>镜头构图</span><input type="text" data-field="camera" placeholder="全身，中景，保持角色完整" value="${escapeHtml(d.camera || "")}"></div>
+      <div class="node-row"><span>光线氛围</span><input type="text" data-field="lighting" placeholder="冷暖对比、夕阳、薄雾、霓虹反射" value="${escapeHtml(d.lighting || "")}"></div>
+      <div class="node-row node-row-col"><span>补充要求</span><textarea data-field="extra" placeholder="保持角色脸、发型、服装和配色一致，融入环境光影">${escapeHtml(d.extra || "")}</textarea></div>
+      ${renderImageGenerationInputs(node)}
+      <div class="node-indicators character-slots">
+        <span class="indicator ${hasCharacter ? "ready" : ""}">①角色参考 ${hasCharacter ? "✓" : "○"}</span>
+        <span class="indicator ${refs.length > 1 ? "ready" : ""}">②环境参考 ${refs.length > 1 ? "✓" : "可选"}</span>
+      </div>
+      <div class="node-tip">第1张图片固定角色外观，第2张可选环境参考；填写环境描述后生成。</div>
+      <button class="node-button" data-node-action="generate-character-environment" ${ready ? "" : "disabled"}>放入环境并生成</button>
     `;
   }
 
@@ -3262,6 +3496,7 @@ function renderNodeBody(node) {
         <button class="node-secondary-button" data-node-action="layer-group-to-image" ${source ? "" : "disabled"}>合成为图片</button>
         <button class="node-button" data-node-action="open-layer-editor" ${layers.length ? "" : "disabled"}>编辑图层</button>
       </div>
+      <button class="node-secondary-button" data-node-action="export-layer-psd" ${layers.length && !activeLayerPsdExports.has(node.id) ? "" : "disabled"}>${activeLayerPsdExports.has(node.id) ? "正在导出 PSD…" : "导出 PSD"}</button>
     `;
   }
 
@@ -3281,13 +3516,17 @@ function renderNodeBody(node) {
       </div>`;
     return `
       ${renderImageMedia(node)}
+      ${renderMediaDownloadButton(node)}
       ${toolbar}
     `;
   }
 
   if (node.type === "model3dPreview") {
     const director = Boolean(node.data.director);
-    const hasModel = Boolean(node.data.modelAssetId);
+    if (director) return renderDirectorCard(node);
+    const models = getModel3dEntries(node.data);
+    const hasModel = models.length > 0;
+    const hasScene = hasModel || Boolean(node.data.view);
     const hasShot = typeof node.data.url === "string" && node.data.url;
     const modeLabel = { material: "原始材质", clay: "素模", depth: "深度图", normal: "法线图", wireframe: "线框" }[node.data.renderMode] || "素模";
     const preview = hasShot
@@ -3295,21 +3534,22 @@ function renderNodeBody(node) {
            <img class="generated-image" src="${escapeHtml(imageDisplaySource(node.data.url) || transparentPixel)}" data-asset-url="${escapeHtml(node.data.url)}" alt="3D 取景" loading="lazy" referrerpolicy="no-referrer">
            <div class="image-load-error"><strong>预览加载失败</strong></div>
          </div>`
-      : `<div class="empty-media model3d-empty" data-node-action="${hasModel || director ? "model3d-open" : "model3d-upload"}">
+      : `<div class="empty-media model3d-empty" data-node-action="${hasScene || director ? "model3d-open" : "model3d-upload"}">
            <div>
-             <strong>${director ? "进入 3D 导演台" : hasModel ? "点击「调整视角」取景" : "载入 3D 模型"}</strong>
+             <strong>${director ? "进入 3D 导演台" : hasScene ? "点击「调整视角」取景" : "载入 3D 模型"}</strong>
              <div class="image-drop-hint">${director ? "布置场景 · 保存机位 · 运镜排练" : "glb · gltf · obj · fbx · stl"}</div>
            </div>
          </div>`;
     const meta = hasModel
-      ? `<div class="node-row model3d-meta"><span>${escapeHtml(node.data.modelName || "模型")}</span><b>${escapeHtml(modeLabel)}</b></div>`
+      ? `<div class="node-row model3d-meta"><span>${escapeHtml(models.length > 1 ? `${models.length} 个模型 · ${models[0].name || "模型"}` : models[0].name || "模型")}</span><b>${escapeHtml(modeLabel)}</b></div>`
       : "";
     const toolbar = director
       ? `<div class="node-row model3d-meta"><span>${node.data.directorData?.shots?.length || 0} 个机位</span><b>3D 导演台</b></div><div class="media-toolbar"><button data-node-action="model3d-open">打开导演台</button></div>`
-      : hasModel
+      : hasScene
       ? `<div class="media-toolbar">
            <button data-node-action="model3d-open">调整视角</button>
-           <button data-node-action="model3d-upload">更换模型</button>
+           <button data-node-action="model3d-upload">继续载入</button>
+           <button data-node-action="model3d-replace" title="用新模型替换场景内所有已载入模型">更换模型</button>
          </div>`
       : `<div class="media-toolbar">
            <button data-node-action="model3d-upload">载入模型</button>
@@ -3320,9 +3560,14 @@ function renderNodeBody(node) {
   if (node.type === "videoReplicaConfig") return renderVideoReplicaNode(node);
 
   if (node.type === "videoConfig") {
-    const prompt = incomingNodes(node.id, ["text", "llmConfig", "storyboardAssistant", "promptOptimizer"]).length;
     const imageSlots = getImageReferenceSlots(node.id);
     const refSlots = getReferenceMaterialSlots(node.id);
+    const previs = window.Director3D.previsSlots(refSlots);
+    let cameraTip = "";
+    if (previs.length) {
+      try { cameraTip = window.Director3D.cameraGuidance(refSlots); }
+      catch (error) { cameraTip = error.message; }
+    }
     const mode = getVideoMode(node.data);
     const modeSelect = `<select data-field="videoMode">${
       videoModeOptions.map(([k, l]) => `<option value="${k}" ${k === mode ? "selected" : ""}>${l}</option>`).join("")
@@ -3330,19 +3575,6 @@ function renderNodeBody(node) {
     const ratioValue = getVideoRatioValue(node.data);
     const resolution = getVideoResolutionValue(node.data);
     const seconds = clamp(Number(node.data.seconds) || 8, videoSecondsMin, videoSecondsMax);
-    const refIndicators = mode === "first_last"
-      ? `
-        <span class="indicator ${imageSlots[0] ? "ready" : ""}">首帧 ${imageSlots[0] ? "✓" : "○"}</span>
-        <span class="indicator ${imageSlots[1] ? "ready" : ""}">尾帧 ${imageSlots[1] ? "✓" : "○"}</span>`
-      : (refSlots.length
-          ? refSlots.map((ref) => `
-            <button class="indicator ready ref-mention" data-node-action="insert-ref-mention" data-ref-token="${escapeHtml(ref.token)}" title="插入到提示词">
-              ${escapeHtml(ref.token)}
-            </button>`).join("")
-          : `<span class="indicator">参考图 ○</span>`);
-    const modeTip = mode === "first_last"
-      ? "图1=首帧，图2=尾帧，提示词描述中间过渡"
-      : "提示词里用 @图片N / @视频N 指定每张素材的用途";
     const klingTool = window.KlingProvider?.toolFor("video", imageSlots.length > 0) || "";
     const klingParams = renderKlingDynamicParams(node, "video");
     const legacyParams = `
@@ -3350,14 +3582,13 @@ function renderNodeBody(node) {
       <div class="node-row"><span>比例</span><select data-field="ratio">${options(videoAspectOptions, ratioValue)}</select></div>
       <div class="node-row"><span>分辨率</span><select data-field="resolution">${options(videoResolutionOptions, resolution)}</select></div>
       <div class="node-row"><span>时长</span><input type="range" class="node-range" data-field="seconds" min="${videoSecondsMin}" max="${videoSecondsMax}" step="1" value="${seconds}"><b data-range-label="seconds">${seconds}s</b></div>
-      <div class="node-tip">${modeTip}</div>`;
+      `;
     return `
       <div class="node-row"><span>模型</span><select data-field="model">${modelOptionsForNode("video", node.data.providerId, node.data.model, klingTool)}</select></div>
       ${klingParams || legacyParams}
-      <div class="node-indicators">
-        <span class="indicator ${prompt ? "ready" : ""}">提示词 ${prompt ? "✓" : "○"}</span>
-        ${refIndicators}
-      </div>
+      ${renderVideoGenerationInputs(node)}
+      ${previs.length ? `<div class="node-row"><span>跟随预演镜头</span><input type="checkbox" data-field="directorFollow" aria-label="跟随预演镜头" ${node.data.directorFollow !== false ? "checked" : ""}></div>
+      <details class="node-tip"><summary>预演内置规则（${node.data.directorFollow !== false ? "自动应用" : "已关闭"}）</summary>${escapeHtml(cameraTip)}</details>` : ""}
       <button class="node-button" data-node-action="generate-video">生成视频</button>
     `;
   }
@@ -3572,7 +3803,8 @@ function renderNodeBody(node) {
     }
     return `
       ${media}
-      <div class="node-tip">${node.data.taskId ? `Task: ${escapeHtml(node.data.taskId)}` : "视频结果"}</div>
+      ${renderMediaDownloadButton(node)}
+      <div class="node-tip">${node.data.taskId ? `Task: ${escapeHtml(node.data.taskId)}` : node.data.directorSource ? `镜头参考 · ${escapeHtml(node.data.duration || node.data.directorMotion?.duration || "")}s · ${escapeHtml(node.data.ratio || "16:9")}` : "视频结果"}</div>
     `;
   }
 
@@ -4144,26 +4376,43 @@ async function getModelBlob(assetId) {
   return record?.blob || null;
 }
 
-function triggerModelUpload(nodeId) {
+function getModel3dEntries(data = {}) {
+  if (Array.isArray(data.models)) return data.models;
+  return data.modelAssetId
+    ? [{ id: "model", assetId: data.modelAssetId, name: data.modelName || "模型", format: data.modelFormat }]
+    : [];
+}
+
+function model3dDataFromEntries(entries) {
+  const first = entries[0];
+  return { models: entries, modelAssetId: first?.assetId || "", modelName: first?.name || "", modelFormat: first?.format || "" };
+}
+
+async function importModelFiles(nodeId, files, { append = true } = {}) {
+  const node = getNode(nodeId);
+  if (!node || node.type !== "model3dPreview") return;
+  const selectedFiles = Array.from(files || []);
+  if (!selectedFiles.length) return;
+  if (selectedFiles.some((file) => !detectModelFormat(file.name))) {
+    showToast("仅支持 glb / gltf / obj / fbx / stl");
+    return;
+  }
+  const projectId = projectLibrary.activeProjectId;
+  if (activeModel3dEditor?.nodeId !== nodeId) await openModel3dEditor(nodeId, { allowEmpty: true });
+  if (projectLibrary.activeProjectId !== projectId || !getNode(nodeId)) return;
+  if (activeModel3dEditor?.nodeId === nodeId) await activeModel3dEditor.importFiles(selectedFiles, { append });
+}
+
+function triggerModelUpload(nodeId, { append = true } = {}) {
   const input = document.createElement("input");
   input.type = "file";
   input.accept = ".glb,.gltf,.obj,.fbx,.stl";
+  input.multiple = true;
+  const projectId = projectLibrary.activeProjectId;
   input.addEventListener("change", async () => {
-    const file = input.files?.[0];
-    if (!file) return;
-    const format = detectModelFormat(file.name);
-    if (!format) {
-      showToast("仅支持 glb / gltf / obj / fbx / stl");
-      return;
-    }
+    if (projectLibrary.activeProjectId !== projectId || !getNode(nodeId)) return;
     try {
-      const assetId = await persistModelBlob(file, file.name);
-      if (activeModel3dEditor?.nodeId === nodeId) activeModel3dEditor.close();
-      commitHistory();
-      // 换模型时清掉旧截图与视角，避免对不上。
-      updateNode(nodeId, { modelAssetId: assetId, modelName: file.name, modelFormat: format, url: false, view: getNode(nodeId)?.data.director ? getNode(nodeId).data.view : null });
-      showToast("已载入模型，点击「调整视角」取景");
-      openModel3dEditor(nodeId);
+      await importModelFiles(nodeId, input.files, { append });
     } catch (error) {
       showToast(`载入失败：${error.message}`);
     }
@@ -4173,11 +4422,12 @@ function triggerModelUpload(nodeId) {
 
 let activeModel3dEditor = null;
 
-async function openModel3dEditor(nodeId) {
+async function openModel3dEditor(nodeId, { allowEmpty = false } = {}) {
   const node = getNode(nodeId);
   if (!node || node.type !== "model3dPreview") return;
   const isDirector = Boolean(node.data.director);
-  if (!node.data.modelAssetId && !isDirector) {
+  const initialModelCount = getModel3dEntries(node.data).length;
+  if (!getModel3dEntries(node.data).length && !isDirector && !allowEmpty && !node.data.view) {
     triggerModelUpload(nodeId);
     return;
   }
@@ -4215,8 +4465,9 @@ async function openModel3dEditor(nodeId) {
   overlay.innerHTML = `
     <div class="model3d-dialog">
       <header class="model3d-head">
-        <span class="model3d-title">${isDirector ? "3D 导演台" : "3D 取景"} · ${escapeHtml(node.data.modelName || (isDirector ? "场景排练" : "模型"))}</span>
+        <span class="model3d-title">${isDirector ? "3D 导演台" : "3D 取景"} · ${initialModelCount ? `${initialModelCount} 个模型` : "场景"}</span>
         <span class="model3d-head-actions">
+          <button class="node-secondary-button" data-m3d="import" disabled>继续载入模型</button>
           <button class="model3d-close" data-m3d="fullscreen" title="全屏 / 还原">⛶</button>
           <button class="model3d-close" data-m3d="cancel" title="关闭">✕</button>
         </span>
@@ -4243,7 +4494,7 @@ async function openModel3dEditor(nodeId) {
           <button data-m3d="gmode" data-mode="rotate" title="旋转 (E)">旋转</button>
           <button data-m3d="gmode" data-mode="scale" title="缩放 (R)">缩放</button>
           <span class="m3d-sep"></span>
-          <button data-m3d="gspace" title="世界 / 本地坐标系">世界</button>
+          <button data-m3d="gspace" title="世界坐标：沿场景固定方向移动；本地坐标：沿对象自身方向移动">世界坐标</button>
           <button data-m3d="gdel" title="删除选中 (Del)">删除</button>
           <span class="m3d-sep"></span>
           <button data-m3d="grid" title="地面网格显示/隐藏">地面</button>
@@ -4336,7 +4587,7 @@ async function openModel3dEditor(nodeId) {
     const objs = controller.getObjects();
     if (!objs.length) { outliner.innerHTML = `<div class="m3d-insp-note" style="padding:8px">场景为空</div>`; return; }
     outliner.innerHTML = objs.map((o) =>
-      `<button class="m3d-obj ${o.selected ? "active" : ""}" data-obj="${o.id}"><span class="m3d-obj-ico">${objIcon[o.kind] || "•"}</span>${escapeHtml(o.label)}</button>`,
+      `<button class="m3d-obj ${o.selected ? "active" : ""}" data-obj="${escapeHtml(o.id)}"><span class="m3d-obj-ico">${objIcon[o.kind] || "•"}</span>${escapeHtml(o.label)}</button>`,
     ).join("");
   }
   // 属性区（Outliner 下方）：按选中对象显示灯参数 / 材质通道。
@@ -4391,7 +4642,7 @@ async function openModel3dEditor(nodeId) {
       const c = info.channels;
       if (!c) { props.innerHTML = `<div class="m3d-insp-title">材质</div><div class="m3d-insp-note">该模型无可调标准材质</div>`; return; }
       props.innerHTML = `
-        <div class="m3d-insp-title">材质（全模型）</div>
+        <div class="m3d-insp-title">材质（当前模型）</div>
         <label>金属度 <input type="range" data-insp="metalness" min="0" max="1" step="0.01" value="${c.metalness}"></label>
         <label>粗糙度 <input type="range" data-insp="roughness" min="0" max="1" step="0.01" value="${c.roughness}"></label>
         <label>反射 <input type="range" data-insp="envMapIntensity" min="0" max="3" step="0.05" value="${c.envMapIntensity}"></label>
@@ -4406,7 +4657,7 @@ async function openModel3dEditor(nodeId) {
   function refreshPanel() {
     buildOutliner();
     buildProps(controller ? controller.getSelectionInfo() : null);
-    if (isDirector && controller?.hasSelection()) {
+    if (controller?.hasSelection()) {
       const transform = controller.getSelectedTransform();
       const panel = document.createElement("div");
       panel.className = "director-transform";
@@ -4427,18 +4678,42 @@ async function openModel3dEditor(nodeId) {
   let loaded = false;
   let closed = false;
   let captureBusy = false;
+  let importBusy = false;
   let sceneSaveTimer = null;
+  let missingModels = [];
+  const editorProjectId = projectLibrary.activeProjectId;
+  const isCurrentEditor = () => !closed && projectLibrary.activeProjectId === editorProjectId && getNode(nodeId)?.type === "model3dPreview";
   const focusBeforeOpen = document.activeElement;
   const saveScene = (directorData = directorUI?.getData()) => {
-    if (!controller || !loaded || closed) return;
+    if (!controller || !loaded || !isCurrentEditor() || directorUI?.isBusy()) return;
     const st = controller.getState();
+    // 保留暂时读取失败的素材引用，不能在关闭窗口时悄悄丢掉模型。
+    st.models = [...st.models, ...missingModels];
     Object.assign(st, { aspect: selectedRatio, maskAlpha, showGrid });
-    updateNode(nodeId, { view: st, renderMode: st.renderMode, ...(directorData ? { directorData } : {}) });
+    updateNode(nodeId, { ...model3dDataFromEntries(st.models), view: st, renderMode: st.renderMode, ...(directorData ? { directorData } : {}) });
+    const count = st.models.length;
+    overlay.querySelector('.model3d-title').textContent = `${isDirector ? "3D 导演台" : "3D 取景"} · ${count ? `${count} 个模型` : "场景"}`;
   };
   const scheduleSceneSave = () => {
-    if (!isDirector || closed) return;
+    if (closed || !loaded || importBusy || directorUI?.isBusy()) return;
     clearTimeout(sceneSaveTimer);
     sceneSaveTimer = setTimeout(() => saveScene(), 250);
+  };
+  const saveDirectorPoster = async () => {
+    if (!isDirector || !controller || !loaded || importBusy || directorUI?.isBusy()) return;
+    const projectId = projectLibrary.activeProjectId;
+    try {
+      const ar = ratioNumOf(selectedRatio) || 16 / 9;
+      const size = ar >= 1 ? { width: 480, height: Math.round(480 / ar) } : { width: Math.round(480 * ar), height: 480 };
+      const dataUrl = controller.captureCanvas(ar, size).toDataURL("image/jpeg", 0.85);
+      const blob = await (await fetch(dataUrl)).blob();
+      const id = `director-poster-${nodeId}`;
+      await putImageAsset({ id, blob, type: "image/jpeg", createdAt: new Date().toISOString() });
+      const oldUrl = imageAssetObjectUrls.get(id);
+      imageAssetObjectUrls.set(id, URL.createObjectURL(blob));
+      if (oldUrl) URL.revokeObjectURL(oldUrl);
+      if (projectLibrary.activeProjectId === projectId && getNode(nodeId)) updateNode(nodeId, { directorPoster: `${imageAssetPrefix}${id}` });
+    } catch (error) { console.warn("导演台封面保存失败", error); }
   };
   const onPageHide = () => saveScene();
   const syncCamera = () => {
@@ -4464,7 +4739,42 @@ async function openModel3dEditor(nodeId) {
     updateNode(nodeId, { url: sources[0] });
     saveScene();
   };
+  const exportDirectorVideo = async (payload, motion, signal) => {
+    const response = await fetch("/api/director/export", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      throw new Error(result.error || result.message || `预演编码失败 (${response.status})`);
+    }
+    const blob = await response.blob();
+    signal.throwIfAborted();
+    if (!isCurrentEditor()) return;
+    const url = await persistVideoBlob(blob);
+    signal.throwIfAborted();
+    if (!isCurrentEditor()) return;
+    commitHistory();
+    const source = getNode(nodeId);
+    const poster = payload.frames?.[0] ? await persistImageBlob(await (await fetch(payload.frames[0])).blob()) : "";
+    signal.throwIfAborted();
+    if (!isCurrentEditor()) return;
+    if (poster) updateNode(nodeId, { directorPoster: poster });
+    const x = source.position.x + 370;
+    const y = source.position.y + state.nodes.filter((n) => n.data.directorSource === nodeId).length * 80;
+    const videoId = addNode("video", { x, y }, { label: `${motion.title} · 预演`, url, ratio: motion.aspect,
+      directorSource: nodeId, directorMotion: motion, duration: payload.count / payload.fps, poster });
+    addEdge(nodeId, videoId, "output", { label: "预演视频" });
+    const target = window.Director3D.seedanceTarget(backendConfig.providers?.video);
+    if (target && motion.duration >= 2 && motion.duration <= 15) {
+      const configId = addNode("videoConfig", { x: x + 350, y }, { ...target, label: "Seedance · 预演成片", videoMode: "reference",
+        directorFollow: true, ratio: videoAspectOptions.includes(motion.aspect) ? motion.aspect : "adaptive", resolution: "720p", seconds: Math.max(4, Math.ceil(motion.duration)) });
+      const promptId = addNode("text", { x: x + 350, y: y - 260 }, { label: "画面要求",
+        content: "", directorPromptVersion: 1 });
+      addEdge(videoId, configId, "input", { label: "镜头控制", videoRole: "camera" });
+      addEdge(promptId, configId, "input", { label: "提示词", videoRole: "prompt" });
+    }
+  };
   const onResize = () => { if (controller) controller.resize(); updateMask(); };
+  const stageResizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(onResize) : null;
+  stageResizeObserver?.observe(stage);
   const syncGizmoButtons = () => {
     const m = controller?.getGizmoMode?.() || "translate";
     overlay.querySelectorAll('[data-m3d="gmode"]').forEach((b) => b.classList.toggle("active", b.dataset.mode === m));
@@ -4473,12 +4783,15 @@ async function openModel3dEditor(nodeId) {
   const cleanup = () => {
     if (closed) return;
     clearTimeout(sceneSaveTimer);
+    directorUI?.cancelExport();
     directorUI?.stop();
     saveScene();
+    void saveDirectorPoster();
     closed = true;
     window.removeEventListener("resize", onResize);
     document.removeEventListener("keydown", onKey);
     window.removeEventListener("pagehide", onPageHide);
+    stageResizeObserver?.disconnect();
     // 关闭即保存场景（零件 + 视角），无论取消还是截取——摆场景和出图是两件事。
     directorUI?.dispose();
     if (controller) {
@@ -4506,7 +4819,7 @@ async function openModel3dEditor(nodeId) {
       else cleanup();
       return;
     }
-    if (!controller) return;
+    if (!controller || !loaded || importBusy || directorUI?.isBusy()) return;
     if (e.ctrlKey || e.metaKey) {
       if (e.key === "c" || e.key === "C") { e.preventDefault(); controller.copySelected(); }
       else if (e.key === "v" || e.key === "V") { e.preventDefault(); controller.pasteClipboard(); }
@@ -4518,14 +4831,62 @@ async function openModel3dEditor(nodeId) {
     else if (e.key === "Delete" || e.key === "Backspace") { controller.deleteSelected(); }
   };
 
-  activeModel3dEditor = { nodeId, close: cleanup };
+  const importFiles = async (files, { append = true } = {}) => {
+    if (!loaded || !controller || !isCurrentEditor()) { showToast("请等待场景加载完成"); return; }
+    if (importBusy) { showToast("模型正在载入，请稍候"); return; }
+    if (directorUI?.isBusy()) { showToast("预演正在导出，请稍候"); return; }
+    importBusy = true;
+    clearTimeout(sceneSaveTimer);
+    directorUI?.stop();
+    const importButton = overlay.querySelector('[data-m3d="import"]');
+    importButton.disabled = true;
+    controller.setInteractionEnabled(false);
+    let imported = 0;
+    const failures = [];
+    saveScene();
+    commitHistory();
+    try {
+      for (const file of files) {
+        if (!isCurrentEditor()) break;
+        importButton.textContent = `正在载入 ${file.name}…`;
+        try {
+          const assetId = await persistModelBlob(file, file.name);
+          if (!isCurrentEditor()) break;
+          const success = await controller.loadModel(file, detectModelFormat(file.name), {
+            append: append || imported > 0, id: makeId(), assetId, name: file.name,
+          });
+          if (!success || !isCurrentEditor()) break;
+          if (!append && imported === 0) missingModels = [];
+          imported += 1;
+          // 每个文件成功后立即保存；其中一个文件损坏不会丢掉此前成功的模型。
+          updateNode(nodeId, { url: false });
+          saveScene();
+        } catch (error) {
+          failures.push(`${file.name}：${error.message}`);
+        }
+      }
+    } finally {
+      importBusy = false;
+      if (isCurrentEditor()) {
+        controller.setInteractionEnabled(true);
+        importButton.disabled = false;
+        importButton.textContent = "继续载入模型";
+        syncCamera(); refreshPanel(); saveScene();
+        if (failures.length) showToast(`${imported ? `已载入 ${imported} 个模型；` : "载入失败："}${failures.join("；")}`);
+        else if (imported) showToast(`已载入 ${imported} 个模型，可在场景对象中分别选择和调整`);
+      }
+    }
+  };
+  activeModel3dEditor = { nodeId, close: cleanup, importFiles };
 
   let panMode = false;
   overlay.addEventListener("click", async (e) => {
     const objBtn = e.target.closest("[data-obj]");
-    if (objBtn) { if (controller) controller.selectById(objBtn.dataset.obj); return; }
+    if (objBtn) { if (controller && loaded && !importBusy) controller.selectById(objBtn.dataset.obj); return; }
     const act = e.target.closest("[data-m3d]")?.dataset.m3d;
     if (act === "cancel") { cleanup(); return; }
+    if (act === "import") { if (!importBusy && loaded) triggerModelUpload(nodeId); return; }
+    if (importBusy || !loaded || directorUI?.isBusy()) return;
     if (act === "viewmode") {
       if (!controller) return;
       const mode = controller.toggleViewMode();
@@ -4604,7 +4965,7 @@ async function openModel3dEditor(nodeId) {
         const sp = controller.getGizmoSpace() === "local" ? "world" : "local";
         controller.setGizmoSpace(sp);
         const b = overlay.querySelector('[data-m3d="gspace"]');
-        b.textContent = sp === "local" ? "本地" : "世界";
+        b.textContent = sp === "local" ? "本地坐标" : "世界坐标";
         b.classList.toggle("active", sp === "local");
       }
       return;
@@ -4627,12 +4988,14 @@ async function openModel3dEditor(nodeId) {
         // 始终写 IndexedDB（不走 persistImageSource 的 120KB 阈值），避免 base64 进 localStorage 撑爆配额。
         const blob = await (await fetch(dataUrl)).blob();
         const sentinel = await persistImageBlob(blob);
+        if (!isCurrentEditor()) return;
         commitHistory();
         const st = controller.getState();
         st.aspect = selectedRatio;
         st.maskAlpha = maskAlpha;
         st.showGrid = showGrid;
-        updateNode(nodeId, { url: sentinel, view: st, renderMode: st.renderMode });
+        st.models = [...st.models, ...missingModels];
+        updateNode(nodeId, { ...model3dDataFromEntries(st.models), url: sentinel, view: st, renderMode: st.renderMode });
         showToast("已截取当前比例画面，可连线到图片生成节点作参考");
         cleanup();
       } catch (error) {
@@ -4672,15 +5035,23 @@ async function openModel3dEditor(nodeId) {
     document.addEventListener("keydown", onKey);
     window.addEventListener("pagehide", onPageHide);
 
-    if (node.data.modelAssetId) {
-      const blob = await getModelBlob(node.data.modelAssetId);
-      if (closed) return;
-      if (!blob) throw new Error("模型文件丢失，请重新载入");
-      await controller.loadModel(blob, node.data.modelFormat);
-      if (closed) return;
+    for (const entry of getModel3dEntries(node.data)) {
+      try {
+        const blob = await getModelBlob(entry.assetId);
+        if (!isCurrentEditor()) return;
+        if (!blob) throw new Error("模型文件丢失");
+        await controller.loadModel(blob, entry.format, { ...entry, append: true, autoPlace: false, select: false });
+        if (!isCurrentEditor()) return;
+      } catch (error) {
+        if (!isCurrentEditor()) return;
+        const savedModel = node.data.view?.models?.find((model) => model.id === entry.id);
+        missingModels.push(savedModel || entry);
+        showToast(`${entry.name || "模型"}加载失败：${error.message}，素材引用已保留`);
+      }
     }
     // 还原上次视角与场景零件（若有），否则用 loadModel 的自动取景。
     if (node.data.view) controller.setState(node.data.view);
+    else if (Array.isArray(node.data.models)) controller.setState({ models: node.data.models });
     controller.setFov(fovInput.value);
     controller.setGrid(showGrid);
     controller.setShadow(shadowOn);
@@ -4691,16 +5062,17 @@ async function openModel3dEditor(nodeId) {
     overlay.querySelector("[data-m3d='shadow']").classList.toggle("active", shadowOn);
     overlay.querySelector("[data-m3d='ao']").classList.toggle("active", aoOn);
     syncGizmoButtons();
-    updateMask();
+    syncCamera();
     refreshPanel();
     loaded = true;
+    overlay.querySelector('[data-m3d="import"]').disabled = false;
     loadingEl.remove();
     if (isDirector) {
       directorUI = window.Director3D.mountUI({
         overlay, controller, data: node.data.directorData,
         getAspect: () => selectedRatio,
         applyAspect: (value) => { selectedRatio = value; ratioSelect.value = value; updateMask(); },
-        syncCamera, save: saveScene, exportFrames: exportDirectorFrames, notice: showToast,
+        syncCamera, save: saveScene, exportFrames: exportDirectorFrames, exportVideo: exportDirectorVideo, notice: showToast,
         importModel: () => triggerModelUpload(nodeId), escapeHtml,
       });
       controller.resize(); updateMask();
@@ -4800,7 +5172,7 @@ function outgoingNodes(sourceId, types) {
 
 // 全部参考素材槽位：图片（含 3D 截图）走 @图片N，视频走 @视频N，两类各自独立编号。
 function getReferenceMaterialSlots(targetId) {
-  const items = state.edges
+  let items = state.edges
     .filter((edge) => edge.target === targetId)
     .map((edge) => ({ edge, node: getNode(edge.source) }))
     .filter(({ node }) =>
@@ -4808,6 +5180,7 @@ function getReferenceMaterialSlots(targetId) {
       (node?.type === "layerGroup" && node.data?.url) ||
       node?.type === "video" ||
       (node?.type === "model3dPreview" && node.data?.url));
+  if (getNode(targetId)?.type === "videoConfig") items = window.VideoInputs.orderMaterials(items, getVideoMode(getNode(targetId).data));
   let imageN = 0;
   let videoN = 0;
   return items.map((item) => {
@@ -5012,6 +5385,7 @@ function addNode(type, position = getViewportCenter(), data = {}) {
       label: "材质迁移",
       model: getDefaultModel("image"),
       size: getImageSizeValue(getDefaultModel("image"), "2048x2048"),
+      sizeTier: "2K",
       quality: "高清画质",
       outputFormat: "png",
       promptOptimization: "standard",
@@ -5023,10 +5397,36 @@ function addNode(type, position = getViewportCenter(), data = {}) {
       label: "产品换背景",
       model: getDefaultModel("image"),
       size: getImageSizeValue(getDefaultModel("image"), "2048x2048"),
+      sizeTier: "2K",
       quality: "高清画质",
       outputFormat: "png",
       promptOptimization: "standard",
       aspectSource: "product",
+      extra: "",
+    },
+    characterTurnaroundConfig: {
+      label: "角色三视图",
+      model: getDefaultModel("image"),
+      size: getImageSizeValue(getDefaultModel("image"), "1536x1024"),
+      quality: "高清画质",
+      outputFormat: "png",
+      promptOptimization: "standard",
+      characterDescription: "",
+      outfit: "",
+      style: "",
+      extra: "",
+    },
+    characterEnvironmentConfig: {
+      label: "角色环境适配",
+      model: getDefaultModel("image"),
+      size: getImageSizeValue(getDefaultModel("image"), "1536x1024"),
+      quality: "高清画质",
+      outputFormat: "png",
+      promptOptimization: "standard",
+      environment: "",
+      interaction: "",
+      camera: "全身，中景，保持角色完整",
+      lighting: "",
       extra: "",
     },
     faceSwapConfig: { label: "换脸", model: getDefaultModel("image"), size: getImageSizeValue(getDefaultModel("image"), "2048x2048"), quality: "高清画质", extra: "" },
@@ -5303,6 +5703,7 @@ function isStandardImageModel(model) {
   return isGptImage2Model(model) || [
     "gemini-3-pro-image-preview",
     "gemini-3.1-flash-image-preview",
+    "gemini-nano-banana-2.1",
   ].includes(normalizeModelValue("image", model));
 }
 
@@ -5454,6 +5855,47 @@ function imageSizeForAspect(model, aspect, preferredSize) {
     return window.GptImage2Sizes.presetForAspect(aspect, preferredSize).size;
   }
   return nearestByAspect(imageSizeOptions(model).map((pair) => pair[0]), aspect);
+}
+
+function referenceImageSizeTiers(model) {
+  if (isGptImage2Model(model)) return ["1K", "2K", "4K"];
+  if (isSeedream5ProImageModel(model)) return ["1K", "2K"];
+  return [];
+}
+
+function referenceImageSizeTier(model, data = {}) {
+  const tiers = referenceImageSizeTiers(model);
+  if (tiers.includes(data.sizeTier)) return data.sizeTier;
+  // 模型切换时不沿用不支持的档位；旧画布则从原尺寸恢复。
+  if (data.sizeTier) return tiers.includes("2K") ? "2K" : "";
+  const inferred = isGptImage2Model(model)
+    ? window.GptImage2Sizes.inferPreset(data.size).tier
+    : imageSizeOptions(model).find(([size]) => size === data.size)?.[1].match(/\b([124]K)\b/)?.[1];
+  return tiers.includes(inferred) ? inferred : tiers.includes("2K") ? "2K" : "";
+}
+
+function renderReferenceImageSizeControl(node) {
+  const model = normalizeModelValue("image", node.data.model) || getDefaultModel("image");
+  const tiers = referenceImageSizeTiers(model);
+  const selected = referenceImageSizeTier(model, node.data);
+  const choices = ["1K", "2K", "4K"].map((tier) =>
+    `<option value="${tier}"${tier === selected ? " selected" : ""}${tiers.includes(tier) ? "" : " disabled"}>${tier}${tiers.includes(tier) ? "" : "（当前模型不支持）"}</option>`
+  ).join("");
+  return `<div class="node-row"><span>分辨率</span><select data-field="sizeTier"${tiers.length ? "" : " disabled"}>${tiers.length ? "" : '<option value="" selected>由模型决定</option>'}${choices}</select></div>`;
+}
+
+function referenceImageSizeForAspect(model, aspect, data = {}) {
+  const tier = referenceImageSizeTier(model, data);
+  const targetAspect = Number(aspect) > 0 ? Number(aspect) : parseAspect(data.size) || 1;
+  if (isGptImage2Model(model)) {
+    const { ratio } = window.GptImage2Sizes.presetForAspect(targetAspect, data.size);
+    return window.GptImage2Sizes.getPreset(ratio, tier).size;
+  }
+  if (isSeedream5ProImageModel(model)) {
+    const candidates = imageSizeOptions(model).filter(([, label]) => label.endsWith(` · ${tier}`));
+    return nearestByAspect(candidates.map(([size]) => size), targetAspect);
+  }
+  return aspect ? imageSizeForAspect(model, aspect, data.size) : getImageSizeValue(model, data.size);
 }
 
 function ratioNumOf(label) {
@@ -5912,6 +6354,109 @@ async function generateImage(configId) {
   }
 }
 
+function connectedCharacterPrompt(configId) {
+  return incomingNodes(configId, ["text", "llmConfig", "storyboardAssistant", "promptOptimizer"])
+    .map((node) => node.type === "text" ? node.data.content : node.data.output || "")
+    .filter(Boolean)
+    .join("\n");
+}
+
+function characterTurnaroundPrompt(config) {
+  const d = config.data || {};
+  const description = String(d.characterDescription || "").trim() || connectedCharacterPrompt(config.id) || "以参考图中的角色为准";
+  const outfit = String(d.outfit || "").trim();
+  const style = String(d.style || "").trim();
+  const extra = String(d.extra || "").trim();
+  return `请制作一张专业的角色三视图设定图。\n
+角色设定：${description}\n
+${outfit ? `服装与道具：${outfit}\n` : ""}${style ? `画面风格：${style}\n` : ""}
+画面必须在同一张图中清晰呈现同一个角色的正面、侧面、背面三种标准视图，三个人物等高、站姿自然、间距均匀，脸部、发型、服装、配色、比例和道具在三个视角保持严格一致。使用干净的浅色或白色背景，避免透视夸张、动作遮挡、重复角色、额外人物、文字水印和复杂场景，适合作为后续绘图和建模的角色参考。${extra ? `\n补充要求：${extra}` : ""}`;
+}
+
+function characterEnvironmentPrompt(config, referenceCount) {
+  const d = config.data || {};
+  const environment = String(d.environment || "").trim();
+  const interaction = String(d.interaction || "").trim();
+  const camera = String(d.camera || "").trim();
+  const lighting = String(d.lighting || "").trim();
+  const extra = String(d.extra || "").trim();
+  return `请把图片1中的角色自然放入指定环境，保持角色身份与设计完全一致。\n
+环境：${environment}\n
+${interaction ? `角色动作与互动：${interaction}\n` : ""}${camera ? `镜头与构图：${camera}\n` : ""}${lighting ? `光线与氛围：${lighting}\n` : ""}
+角色的脸部、发型、服装、配色、体型和关键道具必须保持不变，按环境真实的透视、接触关系、遮挡、反射、阴影和色温重新渲染，让角色确实站在这个空间里。${referenceCount > 1 ? "图片2是环境参考，只借鉴空间、材质和光线，不替换图片1的角色。" : ""}${extra ? `\n补充要求：${extra}` : ""}`;
+}
+
+async function generateCharacterNode(configId, mode) {
+  const config = getNode(configId);
+  if (!config) return;
+  const isTurnaround = mode === "turnaround";
+  const slots = getImageReferenceSlots(configId);
+  const model = normalizeModelValue("image", config.data.model) || getDefaultModel("image");
+  if (!isTurnaround && !slots[0]?.node?.data?.url) {
+    showToast("请先连接一张角色参考图");
+    return;
+  }
+  if (!isTurnaround && !String(config.data.environment || "").trim()) {
+    showToast("请先填写环境描述");
+    return;
+  }
+  if (isTurnaround && !String(config.data.characterDescription || "").trim() && !slots.length && !connectedCharacterPrompt(configId)) {
+    showToast("请填写角色设定，或连接一张角色参考图");
+    return;
+  }
+  try {
+    assertImageConfigSize(config);
+  } catch (error) {
+    showToast(error.message);
+    return;
+  }
+  const prompt = isTurnaround ? characterTurnaroundPrompt(config) : characterEnvironmentPrompt(config, slots.length);
+  const existing = findOutputImageNode(configId);
+  let imageId = existing?.id || null;
+  const resultLabel = isTurnaround ? "角色三视图结果" : "角色环境结果";
+  if (!imageId) {
+    imageId = addNode("image", { x: config.position.x + 430, y: config.position.y }, { label: resultLabel, loading: true, model });
+    addEdge(configId, imageId, "output", { label: "角色图" });
+  } else {
+    updateNode(imageId, { label: resultLabel, loading: true, url: false, error: "" });
+  }
+
+  const configured = hasApiKey("image", config.data.providerId);
+  showProcessing(configured ? (isTurnaround ? "正在制作角色三视图..." : "正在把角色放入环境...") : "未配置图像 API Key，使用本地模拟生成...");
+  if (!configured) {
+    setTimeout(() => {
+      updateNode(imageId, { loading: false, url: true, model, gradient: generateGradient(`${mode}-${prompt}`), error: "" });
+      updateNode(configId, { executed: true });
+      hideProcessing(isTurnaround ? "角色三视图完成（模拟）" : "角色环境图完成（模拟）");
+    }, 850);
+    return;
+  }
+
+  try {
+    const refImages = await resolveImageReferenceSlots(slots);
+    const requestConfig = { ...config, data: { ...config.data, model } };
+    const url = isMjImageModel(model)
+      ? await requestMjImageGeneration(requestConfig, prompt, refImages)
+      : await requestImageGeneration(requestConfig, prompt, refImages);
+    updateNode(imageId, { loading: false, url, model, gradient: generateGradient(`${mode}-${prompt}`), error: "" });
+    updateNode(configId, { executed: true });
+    hideProcessing(isTurnaround ? "角色三视图完成" : "角色环境图完成");
+    void recordProjectHistory({ type: "image", url, prompt, model });
+  } catch (error) {
+    updateNode(imageId, { loading: false, url: false, error: friendlyImageError(error.message) });
+    processing.hidden = true;
+    showToast(`${isTurnaround ? "角色三视图" : "角色环境适配"}失败：${error.message}`);
+  }
+}
+
+function generateCharacterTurnaround(configId) {
+  return generateCharacterNode(configId, "turnaround");
+}
+
+function generateCharacterEnvironment(configId) {
+  return generateCharacterNode(configId, "environment");
+}
+
 // 换脸提示词：强制模型在底图统一光照下"重生成"脸，而不是抠图粘贴。图片1=底图，图片2=脸源。
 const FACE_SWAP_PROMPT = `这是一次"换脸"任务，给你两张参考图：
 - 图片1 是底图：必须完整保留它的发型、头部角度、姿态、身体、服装、背景、构图与整体光照。
@@ -6094,10 +6639,11 @@ async function generateMaterialTransfer(configId) {
     return;
   }
   const strength = window.MaterialTransfer.normalizeStrength(config.data.strength);
+  const settings = { ...config.data, model };
   const prompt = window.MaterialTransfer.buildPrompt({
     strength,
-    materialHint: config.data.materialHint,
-    extra: config.data.extra,
+    materialHint: settings.materialHint,
+    extra: settings.extra,
   });
   const existing = findOutputImageNode(configId);
   let imageId = existing?.id || null;
@@ -6124,11 +6670,11 @@ async function generateMaterialTransfer(configId) {
     const refImages = await Promise.all([structureNode, materialNode].map((node) => resolveImageForApi(node.data.url)));
     if (refImages.some((source) => !source)) throw new Error("参考图读取失败，请确认两张图片都已就绪");
     const aspect = await probeImageAspect(structureNode.data.url);
-    const nextData = { ...config.data, model };
+    const nextData = { ...settings };
     if (isMjImageModel(model)) {
       if (aspect) nextData.mjAr = nearestByAspect(mjAspectOptions, aspect);
-    } else if (aspect) {
-      nextData.size = imageSizeForAspect(model, aspect, config.data.size);
+    } else {
+      nextData.size = referenceImageSizeForAspect(model, aspect, settings);
     }
     const requestConfig = { ...config, data: nextData };
     const url = isMjImageModel(model)
@@ -6183,7 +6729,7 @@ async function generateProductBackground(configId) {
     if (refImages.some((source) => !source)) throw new Error("输入图片读取失败，请重新载入产品图和背景图");
     const aspectIndex = window.ProductBackground.normalizeAspectSource(settings.aspectSource) === "background" ? 1 : 0;
     const aspect = await probeImageAspect(sources[aspectIndex]);
-    if (aspect) settings.size = imageSizeForAspect(model, aspect, settings.size);
+    settings.size = referenceImageSizeForAspect(model, aspect, settings);
     const url = await requestImageGeneration({ ...config, data: settings }, prompt, refImages);
     updateNode(imageId, { loading: false, url, model, error: "" });
     updateNode(configId, { executed: true });
@@ -6448,6 +6994,64 @@ async function generateLayerSeparation(configId) {
   }
 }
 
+const activeLayerPsdExports = new Set();
+
+async function exportLayerGroupPsd(groupId, draftData = null, triggerButton = null) {
+  const group = getNode(groupId);
+  if (!group || group.type !== "layerGroup") return;
+  if (activeLayerPsdExports.has(groupId)) {
+    showToast("该图层组正在导出 PSD，请稍候");
+    return;
+  }
+  const source = draftData || group.data;
+  // 点击时快照：导出期间继续编辑不会改变本次文件，也不写回项目状态。
+  const data = { ...source, layers: (source.layers || []).map((layer) => ({ ...layer })) };
+  const updateButtons = (busy) => {
+    const buttons = [...document.querySelectorAll('[data-node-action="export-layer-psd"]')]
+      .filter((button) => button.closest(".node")?.dataset.id === groupId);
+    buttons.push(...[...document.querySelectorAll('[data-layer-action="export-psd"]')]
+      .filter((button) => button.closest("[data-layer-group-id]")?.dataset.layerGroupId === groupId));
+    if (triggerButton) buttons.push(triggerButton);
+    for (const button of buttons) {
+      button.disabled = busy || !data.layers.length;
+      button.textContent = busy ? "正在导出 PSD…" : "导出 PSD";
+    }
+  };
+  activeLayerPsdExports.add(groupId);
+  updateButtons(true);
+  try {
+    showToast("正在导出 PSD，图层较多时请稍候");
+    const psd = await window.LayerPsd.buildDocument(data, {
+      loadImage: (assetId) => loadCanvasImage(`${imageAssetPrefix}${assetId}`),
+      createCanvas: (width, height) => {
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        return canvas;
+      },
+    });
+    const bytes = await window.LayerPsd.encodeInWorker(psd);
+    const blob = new Blob([bytes], { type: "image/vnd.adobe.photoshop" });
+    const url = URL.createObjectURL(blob);
+    try {
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${safeFileName(String(data.label || "图层组").replace(/\.psd$/i, ""))}.psd`;
+      document.body.append(link);
+      link.click();
+      link.remove();
+    } finally {
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }
+    showToast(`PSD 已导出，共 ${data.layers.length} 个独立图层`);
+  } catch (error) {
+    showToast(`PSD 导出失败：${error.message || "请刷新页面后重试"}`);
+  } finally {
+    activeLayerPsdExports.delete(groupId);
+    updateButtons(false);
+  }
+}
+
 function layerGroupToImage(groupId) {
   const group = getNode(groupId);
   if (!group || group.type !== "layerGroup" || !group.data.url) return;
@@ -6480,6 +7084,7 @@ async function openLayerGroupEditor(groupId) {
   const imageCache = new Map();
   const overlay = document.createElement("div");
   overlay.className = "layer-editor-overlay";
+  overlay.dataset.layerGroupId = groupId;
   overlay.innerHTML = `
     <section class="layer-editor-dialog" role="dialog" aria-modal="true" aria-label="图层编辑器">
       <header class="layer-editor-head">
@@ -6497,6 +7102,7 @@ async function openLayerGroupEditor(groupId) {
       <footer class="layer-editor-foot">
         <span>拖动图层移动；拖动四角控制点等比缩放</span>
         <button type="button" class="node-secondary-button" data-layer-action="cancel">取消</button>
+        <button type="button" class="node-secondary-button" data-layer-action="export-psd" title="导出当前编辑结果，保留独立像素图层" ${activeLayerPsdExports.has(groupId) ? "disabled" : ""}>${activeLayerPsdExports.has(groupId) ? "正在导出 PSD…" : "导出 PSD"}</button>
         <button type="button" class="node-button" data-layer-action="apply">应用到画布</button>
       </footer>
     </section>`;
@@ -6675,6 +7281,7 @@ async function openLayerGroupEditor(groupId) {
     if (!action) return;
     if (action === "close" || action === "cancel") closeEditor();
     if (action === "extract") extractLayerAsImage(groupId, selectedId);
+    if (action === "export-psd") await exportLayerGroupPsd(groupId, draft, event.target.closest("button"));
     if (action === "apply") {
       const button = event.target.closest("button");
       button.disabled = true;
@@ -7010,7 +7617,8 @@ function startConnection(sourceId, sourcePort) {
   sourcePort?.classList.add("active");
   document.querySelectorAll(".node-port.input").forEach((item) => {
     const nodeId = item.closest(".node")?.dataset.id;
-    if (nodeId && nodeId !== sourceId && !item.dataset.inputEdgeId) item.classList.add("connect-target");
+    const compatible = item.dataset.videoInputRole ? window.VideoInputs.accepts(item.dataset.videoInputRole, getNode(sourceId)) : !item.dataset.inputEdgeId;
+    if (nodeId && nodeId !== sourceId && compatible) item.classList.add("connect-target");
   });
   viewport.classList.add("connecting");
   renderEdges();
@@ -7029,6 +7637,13 @@ function clearPendingConnection() {
 
 function finishConnection(targetId, targetPort = null) {
   if (!pendingConnection) return false;
+  if (getNode(targetId)?.type === "videoConfig") {
+    const sourceId = pendingConnection;
+    const role = targetPort?.dataset.videoInputRole || window.VideoInputs.defaultRole(getNode(sourceId), getVideoInputRows(targetId).filter((row) => row.edge), getVideoMode(getNode(targetId).data));
+    const edgeId = targetPort?.dataset.inputEdgeId;
+    clearPendingConnection();
+    return connectVideoInput(sourceId, targetId, role, edgeId);
+  }
   if (targetPort?.dataset.inputEdgeId) {
     clearPendingConnection();
     showToast("这一路输入已连接，请拖到「添加输入」连接新节点");
@@ -7045,9 +7660,21 @@ function finishConnection(targetId, targetPort = null) {
 function inferConnection(sourceId, targetId) {
   const source = getNode(sourceId);
   const target = getNode(targetId);
+  if (target?.type === "videoConfig") {
+    const role = window.VideoInputs.defaultRole(source, getVideoInputRows(targetId).filter((row) => row.edge), getVideoMode(target.data));
+    return { type: window.VideoInputs.kind(source) === "prompt" ? "promptOrder" : "input", label: window.VideoInputs.roles[role].label };
+  }
   if (source?.type === "videoReplicaConfig" && target?.type === "video") return { type: "output", label: "复刻结果" };
   if (target?.type === "videoReplicaConfig" && source?.type === "image") return { type: "imageOrder", label: "人物参考图" };
   if (target?.type === "videoReplicaConfig" && source?.type === "video") return { type: "default", label: "原视频" };
+  if (["characterTurnaroundConfig", "characterEnvironmentConfig"].includes(source?.type) && target?.type === "image") return { type: "output", label: "角色图" };
+  if (target?.type === "characterTurnaroundConfig" && source?.type === "image") {
+    return { type: "imageOrder", label: "角色参考图" };
+  }
+  if (target?.type === "characterEnvironmentConfig" && source?.type === "image") {
+    const existing = getImageReferenceSlots(targetId).length;
+    return { type: "imageOrder", label: existing === 0 ? "角色参考图" : existing === 1 ? "环境参考图" : `参考图${existing + 1}` };
+  }
   if (source?.type === "imageConfig" && target?.type === "image") return { type: "output", label: "输出" };
   if (source?.type === "videoConfig" && target?.type === "video") return { type: "output", label: "输出" };
   if (source?.type === "storyboardConfig" && target?.type === "image") return { type: "output", label: "故事板" };
@@ -7072,6 +7699,7 @@ function inferConnection(sourceId, targetId) {
   }
   if (target?.type === "promptOptimizer" && source?.type === "text") return { type: "promptOrder", label: "原始创意" };
   if (target?.type === "storyboardAssistant" && ["text", "llmConfig", "promptOptimizer"].includes(source?.type)) return { type: "promptOrder", label: "故事/概念" };
+  if (["characterTurnaroundConfig", "characterEnvironmentConfig"].includes(target?.type) && ["text", "llmConfig", "storyboardAssistant", "promptOptimizer"].includes(source?.type)) return { type: "promptOrder", label: "角色设定" };
   if (target?.type === "imageConfig" && ["text", "llmConfig", "storyboardAssistant", "promptOptimizer"].includes(source?.type)) return { type: "promptOrder", label: "提示词" };
   if (target?.type === "imageConfig" && source?.type === "image") return { type: "imageOrder", label: "参考图" };
   if (source?.type === "faceSwapConfig" && target?.type === "image") return { type: "output", label: "输出" };
@@ -7099,17 +7727,23 @@ const connectionDropTargets = {
   text: [
     { type: "storyboardAssistant", label: "+ 分镜助手" },
     { type: "promptOptimizer", label: "+ 提示词优化" },
+    { type: "characterTurnaroundConfig", label: "+ 角色三视图" },
+    { type: "characterEnvironmentConfig", label: "+ 角色环境适配" },
     { type: "imageConfig", label: "+ 图片生成" },
     { type: "videoConfig", label: "+ 文生视频" },
     { type: "storyboardConfig", label: "+ 故事板生成" },
   ],
   llmConfig: [
     { type: "storyboardAssistant", label: "+ 分镜助手" },
+    { type: "characterTurnaroundConfig", label: "+ 角色三视图" },
+    { type: "characterEnvironmentConfig", label: "+ 角色环境适配" },
     { type: "imageConfig", label: "+ 图片生成" },
     { type: "videoConfig", label: "+ 文生视频" },
     { type: "storyboardConfig", label: "+ 故事板生成" },
   ],
   storyboardAssistant: [
+    { type: "characterTurnaroundConfig", label: "+ 角色三视图" },
+    { type: "characterEnvironmentConfig", label: "+ 角色环境适配" },
     { type: "imageConfig", label: "+ 图片生成" },
     { type: "videoConfig", label: "+ 文生视频" },
     { type: "storyboardConfig", label: "+ 故事板生成" },
@@ -7118,11 +7752,15 @@ const connectionDropTargets = {
     { type: "image", label: "+ 图像结果" },
   ],
   promptOptimizer: [
+    { type: "characterTurnaroundConfig", label: "+ 角色三视图" },
+    { type: "characterEnvironmentConfig", label: "+ 角色环境适配" },
     { type: "imageConfig", label: "+ 图片生成" },
     { type: "videoConfig", label: "+ 文生视频" },
   ],
   image: [
     { type: "videoReplicaConfig", label: "+ 爆款视频复刻(用作人物图)" },
+    { type: "characterTurnaroundConfig", label: "+ 角色三视图(用作参考图)" },
+    { type: "characterEnvironmentConfig", label: "+ 角色环境适配(用作角色图)" },
     { type: "imageConfig", label: "+ 图片生成(用作参考图)" },
     { type: "styleTransferConfig", label: "+ 风格迁移(用作内容图)" },
     { type: "productBackgroundConfig", label: "+ 产品换背景(用作产品图)" },
@@ -7140,6 +7778,12 @@ const connectionDropTargets = {
   ],
   imageConfig: [
     { type: "image", label: "+ 图像结果" },
+  ],
+  characterTurnaroundConfig: [
+    { type: "image", label: "+ 角色三视图结果" },
+  ],
+  characterEnvironmentConfig: [
+    { type: "image", label: "+ 角色环境结果" },
   ],
   faceSwapConfig: [
     { type: "image", label: "+ 换脸结果" },
@@ -7274,6 +7918,14 @@ async function refreshNode(id) {
   }
   if (node.type === "productBackgroundConfig") {
     generateProductBackground(id);
+    return;
+  }
+  if (node.type === "characterTurnaroundConfig") {
+    generateCharacterTurnaround(id);
+    return;
+  }
+  if (node.type === "characterEnvironmentConfig") {
+    generateCharacterEnvironment(id);
     return;
   }
   if (node.type === "templateImageConfig") {
@@ -7468,7 +8120,7 @@ function getNodeOutputPoint(nodeId) {
 function updateConnectionPreview(clientX, clientY) {
   if (!pendingConnection) return;
   connectionPreviewPoint = screenToWorld(clientX, clientY);
-  renderEdges();
+  scheduleCanvasFrame();
 }
 
 const activeVideoReplicaRuns = new Set();
@@ -7674,56 +8326,72 @@ async function generateVideoReplica(configId) {
   }
 }
 
+const activeVideoRuns = new Set();
+
 async function generateVideo(configId) {
-  const config = getNode(configId);
-  if (!config) return;
+  const sourceConfig = getNode(configId);
+  if (!sourceConfig) return;
+  const config = { ...sourceConfig, data: cloneJson(sourceConfig.data) };
+  const projectId = projectLibrary.activeProjectId;
   const runningOutput = findOutputVideoNode(configId);
-  if (runningOutput?.data?.loading && runningOutput.data.taskId) {
+  if (activeVideoRuns.has(configId) || (runningOutput?.data?.loading && runningOutput.data.taskId)) {
     showToast("已有视频任务在生成，请勿重复提交");
     return;
   }
-  let ratio = getVideoRatioValue(config.data);
-  const klingContext = klingContextForNode(config, "video");
-  if (klingContext && window.KlingProvider?.videoRatioForSpec) {
-    const firstImage = getImageReferenceSlots(configId)[0]?.node;
-    const imageAspect = firstImage?.data?.url ? await probeImageAspect(firstImage.data.url) : 0;
-    const inputRatio = imageAspect
-      ? nearestByAspect(videoAspectOptions.filter((value) => value !== "adaptive"), imageAspect)
-      : "";
-    ratio = window.KlingProvider.videoRatioForSpec(klingContext.spec, klingStoredParams(config), inputRatio, ratio);
-  }
-  // 已连了视频结果节点就复用，不再新建
-  const existing = findOutputVideoNode(configId);
-  let videoId = existing?.id;
-  if (!videoId) {
-    videoId = addNode("video", { x: config.position.x + 370, y: config.position.y }, { label: "视频生成中...", loading: true, model: config.data.model, ratio, taskId: `task_${Date.now()}` });
-    addEdge(configId, videoId, "output", { label: "输出" });
-  } else {
-    updateNode(videoId, { loading: true, url: false, error: "", label: "视频生成中...", ratio, model: config.data.model });
-  }
-  const prompt = normalizePromptReferenceMentions(getNodePrompt(configId) || "make animate");
-  // 按 @图片N / @视频N 的槽位顺序收集素材，编号要和提示词里的引用对齐。
-  const slots = getReferenceMaterialSlots(configId);
-  const images = (await Promise.all(
-    slots.filter((s) => s.kind === "image").map((s) => resolveImageForApi(s.node.data.url)),
-  )).filter(Boolean);
-  const videos = (await Promise.all(
-    slots.filter((s) => s.kind === "video").map((s) => resolveImageForApi(s.node.data.url)),
-  )).filter(Boolean);
-
-  const vidConfigured = hasApiKey("video", config.data.providerId);
-  showProcessing(vidConfigured ? "正在创建视频 API 任务..." : "未配置视频 API Key，使用本地模拟生成...");
-
-  if (!vidConfigured) {
-    setTimeout(() => {
-      updateNode(videoId, { label: "视频生成结果", loading: false, url: true, gradient: generateGradient(config.data.model + ratio) });
-      updateNode(configId, { executed: true });
-      hideProcessing("视频任务已完成（模拟）");
-    }, 1000);
-    return;
-  }
-
+  activeVideoRuns.add(configId);
+  let videoId;
   try {
+    // 预演的镜头要求独立于可编辑的场景描述，并使用实际连线槽位编号。
+    const slots = getReferenceMaterialSlots(configId);
+    const roleGuidance = window.VideoInputs.referenceGuidance(slots, getVideoMode(config.data));
+    const prompt = normalizePromptReferenceMentions(window.Director3D.videoPrompt(
+      [getNodePrompt(configId), roleGuidance ? `【素材用途】\n${roleGuidance}` : ""].filter(Boolean).join("\n\n"), slots, config.data));
+    if (getVideoMode(config.data) === "first_last") {
+      const rows = getVideoInputRows(configId);
+      if (!rows.find((row) => row.role === "first")?.edge) throw new Error("请先连接首帧图片，尾帧不能单独作为首帧提交");
+      if (slots.some((slot) => slot.kind === "video") || slots.filter((slot) => slot.kind === "image").length > 2) throw new Error("首尾帧模式只使用首帧和尾帧图片，请断开其他参考素材");
+    }
+    const resolved = await Promise.all(slots.map(async (slot) => {
+      const url = await resolveImageForApi(slot.node.data.url);
+      if (!url) throw new Error(`${slot.token} 素材不可用，请重新载入后再生成`);
+      return { ...slot, url };
+    }));
+    const images = resolved.filter((slot) => slot.kind === "image").map((slot) => slot.url);
+    const videos = resolved.filter((slot) => slot.kind === "video").map((slot) => slot.url);
+    if (projectLibrary.activeProjectId !== projectId || !getNode(configId)) throw new Error("项目或节点已切换，请回到原项目重新生成");
+    let ratio = getVideoRatioValue(config.data);
+    const klingContext = klingContextForNode(config, "video");
+    if (klingContext && window.KlingProvider?.videoRatioForSpec) {
+      const firstImage = getImageReferenceSlots(configId)[0]?.node;
+      const imageAspect = firstImage?.data?.url ? await probeImageAspect(firstImage.data.url) : 0;
+      const inputRatio = imageAspect
+        ? nearestByAspect(videoAspectOptions.filter((value) => value !== "adaptive"), imageAspect)
+        : "";
+      ratio = window.KlingProvider.videoRatioForSpec(klingContext.spec, klingStoredParams(config), inputRatio, ratio);
+    }
+    // 已连了视频结果节点就复用，不再新建
+    const existing = findOutputVideoNode(configId);
+    videoId = existing?.id;
+    if (!videoId) {
+      videoId = addNode("video", { x: config.position.x + getNodeSize(config).width + 80, y: config.position.y }, { label: "视频生成中...", loading: true, model: config.data.model, ratio, taskId: `task_${Date.now()}` });
+      addEdge(configId, videoId, "output", { label: "输出" });
+    } else {
+      updateNode(videoId, { loading: true, url: false, error: "", label: "视频生成中...", ratio, model: config.data.model });
+    }
+    updateNode(videoId, { generationPrompt: prompt });
+
+    const vidConfigured = hasApiKey("video", config.data.providerId);
+    showProcessing(vidConfigured ? "正在创建视频 API 任务..." : "未配置视频 API Key，使用本地模拟生成...");
+
+    if (!vidConfigured) {
+      setTimeout(() => {
+        updateNode(videoId, { label: "视频生成结果", loading: false, url: true, gradient: generateGradient(config.data.model + ratio) });
+        updateNode(configId, { executed: true });
+        hideProcessing("视频任务已完成（模拟）");
+      }, 1000);
+      return;
+    }
+
     const created = await requestVideoCreate(config, prompt, images, videos);
     const taskId = created?.id;
     if (!taskId) throw new Error("视频接口未返回任务 ID");
@@ -7732,8 +8400,125 @@ async function generateVideo(configId) {
     updateNode(configId, { executed: true });
     hideProcessing("视频任务已完成");
   } catch (error) {
-    handleVideoPollingError(videoId, error);
+    if (videoId) handleVideoPollingError(videoId, error);
+    else showToast(error.message);
+  } finally {
+    activeVideoRuns.delete(configId);
   }
+}
+
+const activeMediaDownloads = new Set();
+
+function mediaDownloadLabel(node) {
+  return node.type === "image" ? "下载图片" : node.data.directorSource ? "下载预演 MP4" : "下载视频";
+}
+
+function renderMediaDownloadButton(node) {
+  if (node.data.loading || typeof node.data.url !== "string" || !node.data.url) return "";
+  const busy = activeMediaDownloads.has(`${node.type}:${node.data.url}`);
+  const action = node.type === "video" && node.data.directorSource ? "download-previs" : "download-media";
+  return `<button class="node-secondary-button media-download-button" data-node-action="${action}" ${busy ? 'disabled aria-busy="true"' : ""}>${busy ? "准备下载…" : mediaDownloadLabel(node)}</button>`;
+}
+
+async function mediaDownloadExtension(blob, kind) {
+  if (!blob?.size) throw new Error("素材为空或已丢失，请重新载入");
+  const mime = String(blob.type || "").split(";")[0].toLowerCase().trim();
+  const types = kind === "video"
+    ? { "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov", "video/ogg": "ogv", "video/x-matroska": "mkv" }
+    : { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif", "image/avif": "avif", "image/svg+xml": "svg", "image/bmp": "bmp", "image/tiff": "tiff" };
+  if (types[mime]) return types[mime];
+  // Some storage providers serve media as generic binary; inspect its container header.
+  if (["", "application/octet-stream", "binary/octet-stream"].includes(mime)) {
+    const bytes = new Uint8Array(await blob.slice(0, 32).arrayBuffer());
+    const text = String.fromCharCode(...bytes);
+    if (kind === "image") {
+      if (text.startsWith("\x89PNG\r\n\x1a\n")) return "png";
+      if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return "jpg";
+      if (text.startsWith("RIFF") && text.slice(8, 12) === "WEBP") return "webp";
+      if (/^GIF8[79]a/.test(text)) return "gif";
+      if (text.slice(4, 8) === "ftyp" && /avif|avis/.test(text.slice(8))) return "avif";
+    } else {
+      if (text.slice(4, 8) === "ftyp" && !/avif|avis|heic/.test(text.slice(8))) return text.slice(8, 12) === "qt  " ? "mov" : "mp4";
+      if (bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) return "webm";
+    }
+  }
+  throw new Error(`返回内容不是有效的${kind === "video" ? "视频" : "图片"}文件`);
+}
+
+async function readMediaDownloadBlob(source, kind, project) {
+  const assetId = getIndexedImageId(source);
+  if (assetId) {
+    const record = await getImageAsset(assetId);
+    if (!record?.blob) throw new Error("本地素材已丢失，请重新载入");
+    return record.blob;
+  }
+  const read = async (url, options) => {
+    const response = await fetch(url, options);
+    if (!response.ok) throw new Error(`素材读取失败（HTTP ${response.status}）`);
+    const blob = await response.blob();
+    await mediaDownloadExtension(blob, kind);
+    return blob;
+  };
+  if (kind !== "video" || !/^https?:\/\//i.test(source)) return read(kind === "image" ? imageDisplaySource(source) : source);
+  const item = project?.history?.find((entry) => entry.type === "video" && entry.url === source);
+  if (item) {
+    try { return await read(historyVideoSrc(project, item)); } catch { /* Archive may still be in progress. */ }
+  }
+  try { return await read(source, { credentials: "omit", referrerPolicy: "no-referrer" }); }
+  catch (directError) {
+    if (!project?.id) throw directError;
+    // Reuse the existing archive endpoint when the upstream video blocks browser CORS.
+    const response = await fetch("/api/history/save", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, projectName: project.name, historyId: item?.id || makeId(),
+        createdAt: item?.createdAt || new Date().toISOString(), type: "video", remoteUrl: source,
+        prompt: item?.prompt || "", model: item?.model || "" }) });
+    const saved = await response.json().catch(() => null);
+    if (!response.ok || !saved?.ok || !saved.fileUrl?.startsWith("/api/history/file?")) throw new Error("视频读取失败，链接可能已过期，请在历史记录中下载或重新查询任务");
+    return read(saved.fileUrl);
+  }
+}
+
+async function downloadMediaSource(source, kind, label, button = null) {
+  if (typeof source !== "string" || !source || !["image", "video"].includes(kind)) { showToast("素材尚未生成完成"); return; }
+  const key = `${kind}:${source}`;
+  if (activeMediaDownloads.has(key)) return;
+  activeMediaDownloads.add(key);
+  const previousLabel = button?.textContent;
+  if (button) { button.disabled = true; button.textContent = "准备下载…"; button.setAttribute("aria-busy", "true"); }
+  const project = getActiveProject();
+  try {
+    const blob = await readMediaDownloadBlob(source, kind, project);
+    const extension = await mediaDownloadExtension(blob, kind);
+    const basename = safeFileName(label || `6mang-${kind}-${Date.now()}`).replace(/\.(png|jpe?g|webp|gif|avif|svg|bmp|tiff?|mp4|webm|mov|ogv|mkv)$/i, "").replace(/[. ]+$/, "") || `6mang-${kind}`;
+    const href = URL.createObjectURL(blob);
+    try {
+      const link = document.createElement("a");
+      link.href = href; link.download = `${basename}.${extension}`;
+      document.body.appendChild(link); link.click(); link.remove();
+    } finally { setTimeout(() => URL.revokeObjectURL(href), 60000); }
+    showToast("已开始下载，可在浏览器下载列表中查看");
+  } catch (error) { showToast(error.message || "下载失败，请重试"); }
+  finally {
+    activeMediaDownloads.delete(key);
+    if (button?.isConnected) { button.disabled = false; button.textContent = previousLabel; button.removeAttribute("aria-busy"); }
+    // A canvas rerender during download may have replaced the original button.
+    document.querySelectorAll('.node [data-node-action="download-media"], .node [data-node-action="download-previs"]').forEach((current) => {
+      const node = getNode(current.closest(".node")?.dataset.id);
+      if (node && `${node.type}:${node.data.url}` === key) {
+        current.disabled = Boolean(node.data.loading); current.textContent = mediaDownloadLabel(node); current.removeAttribute("aria-busy");
+      }
+    });
+  }
+}
+
+async function downloadNodeMedia(nodeId, button = null) {
+  const node = getNode(nodeId);
+  if (!node || node.data.loading) return;
+  return downloadMediaSource(node.data.url, node.type, node.data.label, button);
+}
+
+async function downloadPrevis(nodeId, button = null) {
+  return downloadNodeMedia(nodeId, button);
 }
 
 function videoProviderForPolling(providerId = "") {
@@ -7810,7 +8595,7 @@ async function pollVideoTask(videoId, taskId, providerId = "") {
     if (result?.video_url) {
       updateNode(videoId, { label: getNode(videoId)?.data.replicaPrompt ? "视频复刻结果" : "视频生成结果", loading: false, url: result.video_url, taskId, gradient: generateGradient(taskId), error: "", replicaPending: false });
       const videoNode = getNode(videoId);
-      const saved = await recordProjectHistory({ type: "video", url: result.video_url, prompt: videoNode?.data?.replicaPrompt || "", model: videoNode?.data?.model || "" });
+      const saved = await recordProjectHistory({ type: "video", url: result.video_url, prompt: videoNode?.data?.replicaPrompt || videoNode?.data?.generationPrompt || "", model: videoNode?.data?.model || "" });
       // 上游视频链接会过期；落盘成功后切到持久的本地回流地址，刷新画布后仍可播放。
       if (saved?.fileUrl && getNode(videoId)) updateNode(videoId, { url: saved.fileUrl });
       return;
@@ -7867,6 +8652,22 @@ function createProductBackgroundFromSource(sourceId) {
   const configId = addNode("productBackgroundConfig", { x: source.position.x + 350, y: source.position.y });
   addEdge(sourceId, configId, "imageOrder", { label: "产品图" });
   showToast("已连接产品图，上传或连接背景图即可");
+}
+
+function createCharacterTurnaroundFromSource(sourceId) {
+  const source = getNode(sourceId);
+  if (!source || source.type !== "image") return;
+  const configId = addNode("characterTurnaroundConfig", { x: source.position.x + 380, y: source.position.y }, { label: "角色三视图" });
+  addEdge(sourceId, configId, "imageOrder", { label: "角色参考图" });
+  showToast("已连接角色参考图，可补充角色设定后生成三视图");
+}
+
+function createCharacterEnvironmentFromSource(sourceId) {
+  const source = getNode(sourceId);
+  if (!source || source.type !== "image") return;
+  const configId = addNode("characterEnvironmentConfig", { x: source.position.x + 380, y: source.position.y }, { label: "角色环境适配" });
+  addEdge(sourceId, configId, "imageOrder", { label: "角色参考图" });
+  showToast("已连接角色参考图，请填写环境描述");
 }
 
 function createSeedreamPreciseEdit(imageId) {
@@ -8086,6 +8887,8 @@ function renderContextMenu() {
     items.push({ action: "save-image", label: "保存图片" });
     items.push({ kind: "separator" });
     items.push({ action: "image-to-image", label: "创建图生图" });
+    items.push({ action: "character-turnaround", label: "创建角色三视图" });
+    items.push({ action: "character-environment", label: "创建角色环境适配" });
     items.push({ action: "style-transfer", label: "创建风格迁移" });
     items.push({ action: "product-background", label: "创建产品换背景" });
     items.push({ action: "material-transfer", label: "创建材质迁移" });
@@ -8127,6 +8930,8 @@ function renderContextMenu() {
     items.push({ action: "duplicate-node", label: "复制节点" });
     if (node.type === "image") {
       items.push({ action: "image-to-image", label: "创建图生图" });
+      items.push({ action: "character-turnaround", label: "创建角色三视图" });
+      items.push({ action: "character-environment", label: "创建角色环境适配" });
       items.push({ action: "style-transfer", label: "创建风格迁移" });
       items.push({ action: "product-background", label: "创建产品换背景" });
       items.push({ action: "material-transfer", label: "创建材质迁移" });
@@ -8137,6 +8942,7 @@ function renderContextMenu() {
     if (node.type === "layerGroup") {
       items.push({ action: "open-layer-editor", label: "编辑图层" });
       items.push({ action: "layer-group-to-image", label: "合成为图片" });
+      items.push({ action: "export-layer-psd", label: "导出 PSD" });
       items.push({ action: "product-background", label: "创建产品换背景" });
       items.push({ action: "material-transfer", label: "创建材质迁移" });
     }
@@ -8210,6 +9016,8 @@ function handleContextAction(action) {
   if (action === "duplicate-node" && nodeId) duplicateNode(nodeId);
   if (action === "delete-node" && nodeId) removeNode(nodeId);
   if (action === "image-to-image" && nodeId) createImageToImage(nodeId);
+  if (action === "character-turnaround" && nodeId) createCharacterTurnaroundFromSource(nodeId);
+  if (action === "character-environment" && nodeId) createCharacterEnvironmentFromSource(nodeId);
   if (action === "style-transfer" && nodeId) createStyleTransferFromImage(nodeId);
   if (action === "material-transfer" && nodeId) createMaterialTransferFromSource(nodeId);
   if (action === "product-background" && nodeId) createProductBackgroundFromSource(nodeId);
@@ -8217,6 +9025,7 @@ function handleContextAction(action) {
   if (action === "seedream-layer-separation" && nodeId) createSeedreamLayerSeparation(nodeId);
   if (action === "open-layer-editor" && nodeId) openLayerGroupEditor(nodeId);
   if (action === "layer-group-to-image" && nodeId) layerGroupToImage(nodeId);
+  if (action === "export-layer-psd" && nodeId) exportLayerGroupPsd(nodeId);
   if (action === "image-to-video" && nodeId) createImageToVideo(nodeId);
   if (action === "preview-image" && imageSource) openImagePreview(imageSource);
   if (action === "save-image" && imageSource) saveImageSource(imageSource);
@@ -8245,6 +9054,8 @@ function handleContextAction(action) {
     "add-style-transfer-config": "styleTransferConfig",
     "add-material-transfer-config": "materialTransferConfig",
     "add-product-background-config": "productBackgroundConfig",
+    "add-character-turnaround": "characterTurnaroundConfig",
+    "add-character-environment": "characterEnvironmentConfig",
     "add-face-swap-config": "faceSwapConfig",
     "add-seedream-edit": "seedreamEdit",
     "add-layer-separation": "layerSeparation",
@@ -8352,30 +9163,7 @@ async function openImagePreview(source) {
 }
 
 async function saveImageSource(source) {
-  try {
-    let href = "";
-    if (getIndexedImageId(source)) {
-      href = await loadImageAssetObjectUrl(getIndexedImageId(source));
-    } else if (/^https?:\/\//i.test(source)) {
-      const response = await fetch(imageDisplaySource(source));
-      if (!response.ok) throw new Error("图片下载失败");
-      href = URL.createObjectURL(await response.blob());
-    } else {
-      href = source;
-    }
-    if (!href) throw new Error("图片资源不可用");
-    const link = document.createElement("a");
-    link.href = href;
-    link.download = `6mang-image-${Date.now()}.png`;
-    document.body.append(link);
-    link.click();
-    link.remove();
-    if (href.startsWith("blob:") && ![...imageAssetObjectUrls.values()].includes(href)) {
-      setTimeout(() => URL.revokeObjectURL(href), 1000);
-    }
-  } catch (error) {
-    showToast(error.message || "保存图片失败");
-  }
+  return downloadMediaSource(source, "image", `6mang-image-${Date.now()}`);
 }
 
 function beginMarqueeSelection(event) {
@@ -8397,11 +9185,11 @@ function beginMarqueeSelection(event) {
 
 function cancelMarqueeSelection(event) {
   if (!marquee) return;
+  pendingCanvasMove = null;
   marquee = null;
   marqueeSelection.hidden = true;
   viewport.classList.remove("selecting");
   try { viewport.releasePointerCapture(event?.pointerId); } catch {}
-  render();
 }
 
 function updateMarqueeSelection(clientX, clientY) {
@@ -8414,34 +9202,41 @@ function updateMarqueeSelection(clientX, clientY) {
   marqueeSelection.style.width = `${rect.width}px`;
   marqueeSelection.style.height = `${rect.height}px`;
 
-  const selected = [...document.querySelectorAll(".node")]
-    .filter((element) => intersects(rect, element.getBoundingClientRect()))
-    .map((element) => element.dataset.id);
+  const viewportRect = viewport.getBoundingClientRect();
+  const { x, y, zoom } = state.view;
+  const selected = state.nodes.filter((node) => {
+    const size = getRenderedNodeSize(node);
+    const left = viewportRect.left + x + node.position.x * zoom;
+    const top = viewportRect.top + y + node.position.y * zoom;
+    return intersects(rect, { left, top, right: left + size.width * zoom, bottom: top + size.height * zoom });
+  }).map((node) => node.id);
   setSelectedNodes(selected);
 }
 
 function finishMarqueeSelection(event) {
   if (!marquee) return;
+  pendingCanvasMove = null;
   updateMarqueeSelection(event.clientX, event.clientY);
   marquee = null;
   marqueeSelection.hidden = true;
   viewport.classList.remove("selecting");
   try { viewport.releasePointerCapture(event.pointerId); } catch {}
-  render();
 }
 
 function finishCanvasDrag(event) {
   if (!drag) return;
   if (event?.pointerId !== undefined && drag.pointerId !== undefined && event.pointerId !== drag.pointerId) return;
+  if (event?.type === "pointerup") pendingCanvasMove = event;
+  flushCanvasFrame();
   if (drag.type === "node") {
     const targetGroup = event ? getGroupAtPoint(screenToWorld(event.clientX, event.clientY)) : null;
     if (targetGroup && addNodesToGroup(targetGroup.id, drag.ids)) {
+      relayoutGroups();
       showToast("已添加到群组");
     }
   }
-  if (drag.type === "node" || drag.type === "group") commitHistory();
-  if (drag.type === "compare") saveState();
-  if (drag.type === "expand") { saveState(); render(); }
+  saveState();
+  if (drag.type === "expand") render();
   drag = null;
   viewport.classList.remove("dragging");
   viewport.classList.remove("resizing");
@@ -8467,6 +9262,8 @@ function applyCompareSplit(event) {
 function cancelCanvasDrag(event) {
   if (!drag) return;
   if (event?.pointerId !== undefined && drag.pointerId !== undefined && event.pointerId !== drag.pointerId) return;
+  flushCanvasFrame();
+  saveState();
   drag = null;
   viewport.classList.remove("dragging");
   viewport.classList.remove("resizing");
@@ -8766,6 +9563,7 @@ function intersects(a, b) {
 }
 
 viewport.addEventListener("pointerdown", (event) => {
+  flushCanvasFrame();
   // 中键长按拖拽平移画布（不依赖左键，照顾没有中键的鼠标仍可用左键平移）
   if (event.button === 1) {
     event.preventDefault();
@@ -8798,7 +9596,6 @@ viewport.addEventListener("pointerdown", (event) => {
     };
     viewport.classList.add("resizing");
     try { viewport.setPointerCapture(event.pointerId); } catch {}
-    render();
     return;
   }
   if (event.target.closest(".edge-link")) {
@@ -8869,6 +9666,7 @@ viewport.addEventListener("pointerdown", (event) => {
     if (!selectedNodeIds.has(node.id)) setSelectedNodes([node.id]);
     const start = screenToWorld(event.clientX, event.clientY);
     const ids = selectedNodeIds.has(node.id) ? [...selectedNodeIds] : [node.id];
+    commitHistory();
     drag = {
       type: "node",
       pointerId: event.pointerId,
@@ -8892,6 +9690,7 @@ viewport.addEventListener("pointerdown", (event) => {
       setSelectedNodes(group.nodeIds);
       const start = screenToWorld(event.clientX, event.clientY);
       const ids = group.nodeIds.filter((id) => getNode(id));
+      commitHistory();
       drag = {
         type: "group",
         pointerId: event.pointerId,
@@ -8906,7 +9705,6 @@ viewport.addEventListener("pointerdown", (event) => {
       };
       viewport.classList.add("dragging");
       try { viewport.setPointerCapture(event.pointerId); } catch {}
-      render();
       return;
     }
   }
@@ -8917,7 +9715,6 @@ viewport.addEventListener("pointerdown", (event) => {
     drag = { type: "pan", pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, viewX: state.view.x, viewY: state.view.y };
     viewport.classList.add("dragging");
     try { viewport.setPointerCapture(event.pointerId); } catch {}
-    render();
   }
 });
 
@@ -8927,7 +9724,8 @@ viewport.addEventListener("pointermove", (event) => {
       cancelMarqueeSelection(event);
       return;
     }
-    updateMarqueeSelection(event.clientX, event.clientY);
+    pendingCanvasMove = event;
+    scheduleCanvasFrame();
     return;
   }
 
@@ -8936,13 +9734,41 @@ viewport.addEventListener("pointermove", (event) => {
   }
 
   if (!drag) return;
+  if (event.pointerId !== drag.pointerId) return;
   if (dragButtonReleased(event)) {
     finishCanvasDrag(event);
     return;
   }
+  pendingCanvasMove = event;
+  scheduleCanvasFrame();
+});
 
+function scheduleCanvasFrame() {
+  if (canvasFrame !== null) return;
+  canvasFrame = requestAnimationFrame(flushCanvasFrame);
+}
+
+function flushCanvasFrame() {
+  if (canvasFrame !== null) cancelAnimationFrame(canvasFrame);
+  canvasFrame = null;
+  renderTransforms();
+  const event = pendingCanvasMove;
+  pendingCanvasMove = null;
+  if (event && marquee) updateMarqueeSelection(event.clientX, event.clientY);
+  else if (event && drag) applyCanvasMove(event);
+  if (dirtyGeometryNodes.size) {
+    renderEdges({ nodeIds: dirtyGeometryNodes });
+    dirtyGeometryNodes.clear();
+    relayoutGroups();
+  }
+  renderConnectionPreview();
+}
+
+function applyCanvasMove(event) {
   if (drag.type === "pan") {
-    setView({ ...state.view, x: drag.viewX + event.clientX - drag.startX, y: drag.viewY + event.clientY - drag.startY });
+    state.view.x = drag.viewX + event.clientX - drag.startX;
+    state.view.y = drag.viewY + event.clientY - drag.startY;
+    renderTransforms();
     return;
   }
   if (drag.type === "compare") {
@@ -8966,8 +9792,13 @@ viewport.addEventListener("pointermove", (event) => {
       node.data.width = width;
       node.data.height = height;
     }
-    saveState();
-    render();
+    const element = renderedNodes.get(node.id);
+    element?.style.setProperty("--node-width", `${width}px`);
+    element?.style.setProperty("--node-height", `${height}px`);
+    renderEdges({ nodeIds: new Set([node.id]) });
+    relayoutGroups();
+    const stage = element?.querySelector(".expand-stage");
+    if (stage) layoutExpandStage(stage, node);
     return;
   }
   const point = screenToWorld(event.clientX, event.clientY);
@@ -8977,9 +9808,23 @@ viewport.addEventListener("pointermove", (event) => {
     if (!node || !origin) return;
     node.position.x = origin.x + point.x - drag.startX;
     node.position.y = origin.y + point.y - drag.startY;
+    const element = renderedNodes.get(id);
+    element?.style.setProperty("--x", `${node.position.x}px`);
+    element?.style.setProperty("--y", `${node.position.y}px`);
   });
-  saveState();
-  render();
+  renderEdges({ measure: false, nodeIds: new Set(drag.ids) });
+  relayoutGroups();
+}
+
+// 关闭页面或切走前补齐最后一帧及待保存视图，避免防抖丢掉末次操作。
+function flushCanvasPersistence() {
+  const needsSave = viewSaveTimer !== null || Boolean(drag);
+  flushCanvasFrame();
+  if (needsSave) saveState();
+}
+window.addEventListener("pagehide", flushCanvasPersistence);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") flushCanvasPersistence();
 });
 
 viewport.addEventListener("pointerup", (event) => {
@@ -9079,7 +9924,7 @@ function beginNodeTitleEdit(titleEl, node) {
 document.addEventListener("pointerup", (event) => {
   if (!connectionDrag) return;
   const elementUnder = document.elementFromPoint(event.clientX, event.clientY);
-  const target = elementUnder?.closest(".node-port.input");
+  const target = elementUnder?.closest(".node-port.input, .video-input-row");
   const targetId = target?.closest(".node")?.dataset.id;
   const shouldClear = connectionDrag.moved;
   try { viewport.releasePointerCapture(event.pointerId); } catch {}
@@ -9332,6 +10177,8 @@ document.addEventListener("click", async (event) => {
     if (nodeAction === "generate-style-transfer") generateStyleTransfer(id);
     if (nodeAction === "generate-material-transfer") generateMaterialTransfer(id);
     if (nodeAction === "generate-product-background") generateProductBackground(id);
+    if (nodeAction === "generate-character-turnaround") generateCharacterTurnaround(id);
+    if (nodeAction === "generate-character-environment") generateCharacterEnvironment(id);
     if (nodeAction === "upload-product-background-product") triggerProductBackgroundUpload(id, "product");
     if (nodeAction === "upload-product-background-background") triggerProductBackgroundUpload(id, "background");
     if (nodeAction === "open-seedream-editor") openSeedreamAnnotationEditor(id);
@@ -9339,12 +10186,17 @@ document.addEventListener("click", async (event) => {
     if (nodeAction === "generate-layer-separation") generateLayerSeparation(id);
     if (nodeAction === "open-layer-editor") openLayerGroupEditor(id);
     if (nodeAction === "layer-group-to-image") layerGroupToImage(id);
+    if (nodeAction === "export-layer-psd") exportLayerGroupPsd(id);
     if (nodeAction === "generate-video") generateVideo(id);
+    if (nodeAction === "video-input") handleVideoInputClick(id, event.target.closest(".video-input-row"));
+    if (nodeAction === "disconnect-video-input") removeEdge(event.target.closest(".video-input-row")?.dataset.inputEdgeId);
     if (nodeAction === "generate-video-replica") generateVideoReplica(id);
     if (nodeAction === "upload-replica-video") triggerVideoReplicaUpload(id, "video");
     if (nodeAction === "upload-replica-character") triggerVideoReplicaUpload(id, "character");
     if (nodeAction === "preview-replica-prompt") previewVideoReplicaPrompt(id);
     if (nodeAction === "resume-video-task") resumeVideoTask(id);
+    if (nodeAction === "download-previs") await downloadPrevis(id, event.target.closest("button"));
+    if (nodeAction === "download-media") await downloadNodeMedia(id, event.target.closest("button"));
     if (nodeAction === "image-to-image") createImageToImage(id);
     if (nodeAction === "image-to-video") createImageToVideo(id);
     if (nodeAction === "edit-image") openImageEditor(id);
@@ -9374,6 +10226,7 @@ document.addEventListener("click", async (event) => {
     if (nodeAction === "upload-image") triggerImageUpload(id);
     if (nodeAction === "upload-video") triggerVideoUpload(id);
     if (nodeAction === "model3d-upload") triggerModelUpload(id);
+    if (nodeAction === "model3d-replace") triggerModelUpload(id, { append: false });
     if (nodeAction === "model3d-open") openModel3dEditor(id);
     return;
   }
@@ -9438,6 +10291,8 @@ document.addEventListener("click", async (event) => {
   if (action === "add-style-transfer-config") addNode("styleTransferConfig");
   if (action === "add-material-transfer-config") addNode("materialTransferConfig");
   if (action === "add-product-background-config") addNode("productBackgroundConfig");
+  if (action === "add-character-turnaround") addNode("characterTurnaroundConfig");
+  if (action === "add-character-environment") addNode("characterEnvironmentConfig");
   if (action === "add-face-swap-config") addNode("faceSwapConfig");
   if (action === "add-seedream-edit") addNode("seedreamEdit");
   if (action === "add-layer-separation") addNode("layerSeparation");
@@ -9513,6 +10368,8 @@ function syncNodeFieldControl(control) {
     const parsed = parseModelKey(value);
     node.data.providerId = parsed.providerId;
     node.data.model = parsed.model;
+  } else if (field === "sizeTier" && ["materialTransferConfig", "productBackgroundConfig"].includes(node.type)) {
+    node.data.sizeTier = referenceImageSizeTier(node.data.model, { ...node.data, sizeTier: value });
   } else if ((field === "sizeRatio" || field === "sizeTier") && isGptImage2Model(node.data.model)) {
     const current = gptImage2PresetFromData(node.data);
     const ratio = field === "sizeRatio" ? value : current.ratio;
@@ -9521,7 +10378,7 @@ function syncNodeFieldControl(control) {
   } else {
     node.data[field] = value;
   }
-  if (field === "model" && node.type === "imageConfig") {
+  if (field === "model" && ["imageConfig", "characterTurnaroundConfig", "characterEnvironmentConfig"].includes(node.type)) {
     if (isMjImageModel(node.data.model)) {
       node.data.mjAr = node.data.mjAr || "1:1";
       node.data.mjVersion = getMjVersion(node.data.model, node.data.mjVersion);
@@ -9530,7 +10387,10 @@ function syncNodeFieldControl(control) {
       node.data.size = getImageSizeValue(node.data.model, node.data.size);
     }
   }
-  if (field === "model" && ["styleTransferConfig", "materialTransferConfig", "productBackgroundConfig"].includes(node.type)) {
+  if (field === "model" && ["styleTransferConfig", "materialTransferConfig", "productBackgroundConfig", "characterTurnaroundConfig", "characterEnvironmentConfig"].includes(node.type)) {
+    if (["materialTransferConfig", "productBackgroundConfig"].includes(node.type)) {
+      node.data.sizeTier = referenceImageSizeTier(node.data.model, node.data);
+    }
     if (isMjImageModel(node.data.model)) {
       node.data.mjAr = node.data.mjAr || "1:1";
       node.data.mjVersion = getMjVersion(node.data.model, node.data.mjVersion);
@@ -9571,7 +10431,7 @@ function syncNodeFieldControl(control) {
   if (field === "model" && node.type === "videoConfig") {
     node.data.ratio = getVideoRatioValue(node.data);
   }
-  if (field === "model" && isGptImage2Model(node.data.model) && ["imageConfig", "storyboardConfig", "templateImageConfig"].includes(node.type)) {
+  if (field === "model" && isGptImage2Model(node.data.model) && ["imageConfig", "storyboardConfig", "templateImageConfig", "characterTurnaroundConfig", "characterEnvironmentConfig"].includes(node.type)) {
     applyGptImage2Preset(node.data);
     if (node.data.quality === "4K") node.data.quality = "高清画质";
   }
@@ -9592,7 +10452,10 @@ function syncNodeFieldControl(control) {
     if (out) out.textContent = `${value}s`;
     return true;
   }
-  if (isTextInput || isTextarea) return true;
+  if (isTextInput || isTextarea) {
+    refreshCharacterNodeActionState(nodeEl, node);
+    return true;
+  }
   render();
   return true;
 }
@@ -9605,11 +10468,35 @@ function normalizeNodeModelValue(nodeType, value) {
   if (nodeType === "styleTransferConfig") return normalizeModelValue("image", value);
   if (nodeType === "materialTransferConfig") return normalizeModelValue("image", value);
   if (nodeType === "productBackgroundConfig") return normalizeModelValue("image", value);
+  if (nodeType === "characterTurnaroundConfig") return normalizeModelValue("image", value);
+  if (nodeType === "characterEnvironmentConfig") return normalizeModelValue("image", value);
   if (nodeType === "templateImageConfig") return normalizeModelValue("image", value);
   if (nodeType === "seedreamEdit") return normalizeModelValue("image", value);
   if (nodeType === "layerSeparation") return normalizeModelValue("image", value);
   if (nodeType === "videoConfig") return normalizeModelValue("video", value);
   return value;
+}
+
+function refreshCharacterNodeActionState(nodeEl, node) {
+  if (!nodeEl || !node) return;
+  const action = node.type === "characterTurnaroundConfig"
+    ? "generate-character-turnaround"
+    : node.type === "characterEnvironmentConfig"
+      ? "generate-character-environment"
+      : "";
+  if (!action) return;
+  const button = nodeEl.querySelector(`[data-node-action="${action}"]`);
+  if (!button) return;
+  const refs = getImageReferenceSlots(node.id);
+  if (node.type === "characterTurnaroundConfig") {
+    const ready = Boolean(String(node.data.characterDescription || "").trim())
+      || Boolean(connectedCharacterPrompt(node.id))
+      || refs.some((slot) => slot.node?.data?.url);
+    button.disabled = !ready;
+    return;
+  }
+  const ready = Boolean(refs[0]?.node?.data?.url) && Boolean(String(node.data.environment || "").trim());
+  button.disabled = !ready;
 }
 
 

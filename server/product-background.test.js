@@ -53,7 +53,7 @@ function harness({ slots, configured = true, model = "gpt-image-2", request } = 
     showProcessing: () => {}, hideProcessing: () => {}, render: () => {}, processing: {},
     resolveImageForApi: async (source) => `resolved:${source}`,
     probeImageAspect: async (source) => source === "background" ? 1.5 : 1,
-    imageSizeForAspect: (_, aspect) => { assert.equal(aspect, 1.5); return "1536x1024"; },
+    referenceImageSizeForAspect: (_, aspect) => { assert.equal(aspect, 1.5); return "1536x1024"; },
     requestImageGeneration: async (cfg, prompt, refs) => { calls.push({ cfg, prompt, refs }); return request ? request() : "idb-image:result"; },
     friendlyImageError: (message) => message,
     recordProjectHistory: () => {},

@@ -93,3 +93,28 @@ test("every preset remains finite and serializable, dialogue includes two distin
   assert.notEqual(actors[0].color, actors[1].color);
   assert.notDeepEqual(actors[0].position, actors[1].position);
 });
+
+test("custom path validation catches focus crossings between sampled frames", () => {
+  const motion = { kind: "custom", start: { position: [0, 0, 100], target: [0, 0, 0] }, end: { position: [0, 0, -99], target: [0, 0, 0] } };
+  assert.throws(() => director.validateMotion(motion), /对焦点/);
+  assert.doesNotThrow(() => director.validateMotion({ kind: "truck", start, end: director.endpoint(start, "truck") }));
+});
+
+test("previs export preserves duration with even portrait and landscape dimensions", () => {
+  assert.deepEqual(director.exportSettings(4, "16:9"), { width: 960, height: 540, fps: 24, count: 96 });
+  assert.deepEqual(director.exportSettings(15, "9:16"), { width: 540, height: 960, fps: 24, count: 360 });
+  assert.throws(() => director.exportSettings(31, "16:9"));
+  assert.throws(() => director.exportSettings(4, "bad"));
+});
+
+test("Seedance handoff prefers configured compatible channels and skips first-frame-only models", () => {
+  const group = { default: "cprt", items: {
+    cprt: { configured: true, baseUrl: "https://ai-api.cprt.xyz/v1", models: [{ id: "free-video-2.0-image-to-video" }, { id: "free-video-2.0-multimodal-video" }] },
+    volc: { configured: true, models: [{ id: "doubao-seedance-2-0-fast-260128" }] },
+  } };
+  assert.deepEqual(director.seedanceTarget(group), { providerId: "cprt", model: "free-video-2.0-multimodal-video" });
+  group.items.cprt.configured = false;
+  assert.deepEqual(director.seedanceTarget(group), { providerId: "volc", model: "doubao-seedance-2-0-fast-260128" });
+  group.items.volc.configured = false;
+  assert.equal(director.seedanceTarget(group), null);
+});

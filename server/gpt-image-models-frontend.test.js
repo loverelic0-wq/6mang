@@ -109,6 +109,32 @@ test("both replacement models build OpenAI generation and reference-edit payload
   }
 });
 
+test("147 nano banana 2 nodes migrate to the new 2.1 model", () => {
+  const bananaProvider = {
+    baseUrl: "https://147ai.com/v1",
+    defaultModel: models.LEGACY_NANO_BANANA_MODEL,
+    models: [
+      { id: "gemini-3-pro-image-preview", label: "nano banana pro" },
+      { id: models.LEGACY_NANO_BANANA_MODEL, label: "nano banana 2" },
+    ],
+  };
+  const app = harness(bananaProvider);
+  const node = { type: "imageConfig", data: { providerId: "chosen", model: models.LEGACY_NANO_BANANA_MODEL } };
+  app.ensureNodeProvider(node);
+  assert.equal(node.data.model, models.NANO_BANANA_21_MODEL);
+  assert.equal(bananaProvider.defaultModel, models.NANO_BANANA_21_MODEL);
+  assert.deepEqual(bananaProvider.models.map(({ id }) => id), [
+    "gemini-3-pro-image-preview",
+    models.NANO_BANANA_21_MODEL,
+  ]);
+  const body = app.buildImageGenerationBody({ data: {
+    providerId: "chosen", model: models.NANO_BANANA_21_MODEL, quality: "高清画质", size: "2048x1152",
+  } }, "test prompt", []);
+  assert.deepEqual(JSON.parse(JSON.stringify(body)), {
+    providerId: "chosen", model: models.NANO_BANANA_21_MODEL, prompt: "test prompt", size: "2048x1152", n: 1, quality: "high",
+  });
+});
+
 test("replacement models retain ratio and resolution controls with real output pixels", () => {
   const app = harness(provider());
   for (const { id: model } of models.MODELS) {
