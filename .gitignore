@@ -4,8 +4,9 @@
 .edge-*-profile/
 .env
 .huobao-settings.json
-.huobao-settings.json.bak.*
+.huobao-settings.json.bak*
 output/
+outputs/
 data/
 node_modules/
 *.log

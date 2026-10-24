@@ -645,6 +645,7 @@ const backendConfig = {
 };
 
 const MODEL_KEY_SEPARATOR = "::";
+const activeImageUpscaleRuns = new Set();
 
 function makeModelKey(providerId, modelId) {
   return `${providerId || ""}${MODEL_KEY_SEPARATOR}${modelId || ""}`;
@@ -678,6 +679,22 @@ function getDefaultProviderAndModel(kind) {
   return { providerId, model: item?.defaultModel || item?.models?.[0]?.id || "" };
 }
 
+function getDefaultUpscaleProviderAndModel() {
+  const group = getProviderGroup("image");
+  const entries = Object.entries(group.items || {});
+  const comfy = entries.find(([, item]) => item?.adapter === "comfyui" && (
+    item.models?.some((model) => Array.isArray(model?.capabilities) && model.capabilities.map(String).map((value) => value.toLowerCase()).includes("upscale"))
+    || Array.isArray(item?.capabilities) && item.capabilities.map(String).map((value) => value.toLowerCase()).includes("upscale")
+  ));
+  const found = comfy || entries.find(([, item]) => (
+    Array.isArray(item?.models) && item.models.some((model) => Array.isArray(model?.capabilities) && model.capabilities.map(String).map((value) => value.toLowerCase()).includes("upscale"))
+  ));
+  const providerId = found?.[0] || group.default || entries[0]?.[0] || "";
+  const item = group.items[providerId];
+  const model = item?.defaultModel || item?.models?.find((entry) => Array.isArray(entry?.capabilities) && entry.capabilities.map(String).map((value) => value.toLowerCase()).includes("upscale"))?.id || item?.models?.[0]?.id || "";
+  return { providerId, model };
+}
+
 function findProviderForModel(kind, modelId) {
   const group = getProviderGroup(kind);
   for (const [providerId, item] of Object.entries(group.items)) {
@@ -691,7 +708,7 @@ function ensureNodeProvider(node) {
     Object.assign(node.data, window.VideoReplica.selectModel(getProviderGroup("video"), node.data));
     return;
   }
-  const kindMap = { llmConfig: "chat", storyboardAssistant: "chat", promptOptimizer: "chat", imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", styleTransferConfig: "image", materialTransferConfig: "image", productBackgroundConfig: "image", characterTurnaroundConfig: "image", characterEnvironmentConfig: "image", faceSwapConfig: "image", seedreamEdit: "image", layerSeparation: "image", videoConfig: "video" };
+  const kindMap = { llmConfig: "chat", storyboardAssistant: "chat", promptOptimizer: "chat", imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", imageUpscale: "image", styleTransferConfig: "image", materialTransferConfig: "image", productBackgroundConfig: "image", characterTurnaroundConfig: "image", characterEnvironmentConfig: "image", faceSwapConfig: "image", seedreamEdit: "image", layerSeparation: "image", videoConfig: "video" };
   const kind = kindMap[node.type];
   if (!kind) return;
   if (node.type === "seedreamEdit" || node.type === "layerSeparation") {
@@ -701,6 +718,10 @@ function ensureNodeProvider(node) {
   }
   const group = getProviderGroup(kind);
   if (!Object.keys(group.items).length) return;
+  if (node.type === "imageUpscale" && !node.data.providerId && !node.data.model) {
+    Object.assign(node.data, getDefaultUpscaleProviderAndModel());
+    return;
+  }
   const existing = node.data.providerId && group.items[node.data.providerId] ? node.data.providerId : null;
   if (kind === "image") {
     const provider = existing
@@ -822,10 +843,12 @@ const nodeSizes = {
   videoConfig: { width: 360, height: 280 },
   videoReplicaConfig: { width: 360, height: 560 },
   video: { width: 300, height: 250 },
+  audio: { width: 340, height: 155 },
   storyboardConfig: { width: 360, height: 520 },
   templateImageConfig: { width: 320, height: 360 },
   imageCompare: { width: 320, height: 320 },
   imageExpand: { width: 320, height: 400 },
+  imageUpscale: { width: 320, height: 330 },
   styleTransferConfig: { width: 320, height: 310 },
   materialTransferConfig: { width: 330, height: 350 },
   productBackgroundConfig: { width: 340, height: 380 },
@@ -1033,9 +1056,16 @@ function modelOptionsForNode(kind, providerId, model, activeTool = "") {
   const selectedKey = makeModelKey(providerId || "", model || "");
   let foundMatch = false;
   const groups = items.map(([pid, item]) => {
-    const providerModels = activeTool && isKlingProviderItem(item) && window.KlingProvider
-      ? window.KlingProvider.modelsForTool(item, activeTool)
-      : (item.models || []);
+    const providerModels = activeTool === "upscale"
+      ? (item.models || []).filter((entry) => (
+        (Array.isArray(item.capabilities) && item.capabilities.map(String).map((value) => value.toLowerCase()).includes("upscale"))
+        || (Array.isArray(entry?.capabilities) && entry.capabilities.map(String).map((value) => value.toLowerCase()).includes("upscale"))
+      ))
+      : item.adapter === "comfyui"
+        ? []
+      : activeTool && isKlingProviderItem(item) && window.KlingProvider
+        ? window.KlingProvider.modelsForTool(item, activeTool)
+        : (item.models || []);
     const opts = providerModels.map((m) => {
       const key = makeModelKey(pid, m.id);
       const isSelected = key === selectedKey;
@@ -1045,8 +1075,9 @@ function modelOptionsForNode(kind, providerId, model, activeTool = "") {
     const empty = !opts && isKlingProviderItem(item)
       ? `<option value="" disabled>${item.authenticated ? "当前模式暂无可用模型" : "请先在设置中登录"}</option>`
       : "";
+    if (!opts && !empty) return "";
     return `<optgroup label="${escapeHtmlAttr(item.label || pid)}">${opts || empty}</optgroup>`;
-  }).join("");
+  }).filter(Boolean).join("");
   if (model && !foundMatch) {
     const warn = `<option value="${escapeHtmlAttr(selectedKey)}" selected>⚠ 未配置: ${escapeHtml(model)}</option>`;
     return warn + groups;
@@ -1377,6 +1408,7 @@ function buildSettingsProviderEditor() {
   }
 
   const isDefault = group.default === settingsActiveProviderId;
+  const isComfyUi = item.adapter === "comfyui";
   if (item.managed || isKlingProviderItem(item)) {
     return buildKlingSettingsEditor(wrap, item, isDefault);
   }
@@ -1388,6 +1420,7 @@ function buildSettingsProviderEditor() {
       <h3>编辑：${escapeHtml(item.label || settingsActiveProviderId)}</h3>
       <div class="settings-editor-actions">
         ${isDefault ? '<span class="settings-default-tag">默认子类</span>' : '<button type="button" class="ghost-button" data-settings-action="set-default">设为默认</button>'}
+        ${isComfyUi ? '<button type="button" class="ghost-button" data-settings-action="test-comfyui">测试 ComfyUI</button>' : ""}
         <button type="button" class="ghost-button danger" data-settings-action="delete-provider">删除此子类</button>
       </div>
     </div>
@@ -1399,6 +1432,50 @@ function buildSettingsProviderEditor() {
       <span>Base URL</span>
       <input type="text" data-settings-field="baseUrl" value="${escapeHtmlAttr(item.baseUrl)}" placeholder="https://example.com/v1" />
     </label>
+    <label>
+      <span>适配器</span>
+      <select data-settings-field="adapter">
+        <option value="http"${(item.adapter || "http") === "http" ? " selected" : ""}>HTTP 超分接口</option>
+        <option value="comfyui"${item.adapter === "comfyui" ? " selected" : ""}>本地 ComfyUI</option>
+      </select>
+    </label>
+    <label>
+      <span>超分路径</span>
+      <input type="text" data-settings-field="upscalePath" value="${escapeHtmlAttr(item.upscalePath || "/images/upscale")}" placeholder="/images/upscale" />
+    </label>
+    <label>
+      <span>超分协议</span>
+      <select data-settings-field="upscaleProtocol">
+        <option value="multipart"${(item.upscaleProtocol || "multipart") === "multipart" ? " selected" : ""}>Multipart 图片</option>
+        <option value="json"${item.upscaleProtocol === "json" ? " selected" : ""}>JSON Base64</option>
+      </select>
+    </label>
+    <label>
+      <span>ComfyUI 工作流路径</span>
+      <input type="text" data-settings-field="workflowPath" value="${escapeHtmlAttr(item.workflowPath || "")}" placeholder="Save API Format JSON 的绝对路径或项目内相对路径" />
+    </label>
+    ${isComfyUi ? `
+      <label>
+        <span>自动启动 ComfyUI</span>
+        <input type="checkbox" data-settings-field="autoStart" ${item.autoStart === true ? "checked" : ""} />
+      </label>
+      <label>
+        <span>保持后台运行</span>
+        <input type="checkbox" data-settings-field="keepAlive" ${item.keepAlive !== false ? "checked" : ""} />
+      </label>
+      <label>
+        <span>ComfyUI 安装目录</span>
+        <input type="text" data-settings-field="installDir" value="${escapeHtmlAttr(item.installDir || "")}" placeholder="选择本机实际的 ComfyUI 便携包根目录" />
+      </label>
+      <label>
+        <span>Python 路径</span>
+        <input type="text" data-settings-field="pythonPath" value="${escapeHtmlAttr(item.pythonPath || "")}" placeholder="留空自动使用安装目录下 python_embeded" />
+      </label>
+      <label>
+        <span>端口</span>
+        <input type="number" min="1" max="65535" data-settings-field="port" value="${escapeHtmlAttr(item.port || 8190)}" />
+      </label>
+    ` : ""}
     <label>
       <span>API Key</span>
       <div class="settings-key-row">
@@ -1416,12 +1493,15 @@ function buildSettingsProviderEditor() {
         <button type="button" class="ghost-button" data-settings-action="add-model">+ 添加模型</button>
       </div>
       <table class="settings-models-table">
-        <thead><tr><th>模型 ID</th><th>显示名</th><th></th></tr></thead>
+        <thead><tr><th>模型 ID</th><th>显示名</th><th>超分</th><th>最大倍数</th><th>最大边</th><th></th></tr></thead>
         <tbody>
           ${item.models.map((m, idx) => `
             <tr>
               <td><input type="text" data-settings-model-field="id" data-idx="${idx}" value="${escapeHtmlAttr(m.id)}" /></td>
               <td><input type="text" data-settings-model-field="label" data-idx="${idx}" value="${escapeHtmlAttr(m.label)}" /></td>
+              <td><input type="checkbox" data-settings-model-field="upscale" data-idx="${idx}" ${Array.isArray(m.capabilities) && m.capabilities.includes("upscale") ? "checked" : ""} aria-label="${escapeHtmlAttr(m.label || m.id)} 支持超分" /></td>
+              <td><input type="number" min="2" max="8" step="1" data-settings-model-field="maxScale" data-idx="${idx}" value="${escapeHtmlAttr(m.maxScale || 4)}" /></td>
+              <td><input type="number" min="0" step="1" data-settings-model-field="maxEdge" data-idx="${idx}" value="${escapeHtmlAttr(m.maxEdge || "")}" placeholder="不限" /></td>
               <td><button type="button" class="icon-button danger" data-settings-action="delete-model" data-idx="${idx}" title="删除">×</button></td>
             </tr>
           `).join("")}
@@ -1560,6 +1640,21 @@ settingsModal.addEventListener("click", async (event) => {
     renderSettingsModal();
     return;
   }
+  if (action === "test-comfyui") {
+    const item = group.items[settingsActiveProviderId];
+    if (!item || item.adapter !== "comfyui") return;
+    try {
+      showToast("正在检查并启动 ComfyUI…");
+      await apiFetch("/api/comfyui/test", {
+        method: "POST",
+        body: JSON.stringify({ providerId: settingsActiveProviderId }),
+      });
+      showToast("ComfyUI 已就绪，API 工作流格式有效");
+    } catch (error) {
+      showToast(error.message || "ComfyUI 测试失败");
+    }
+    return;
+  }
   if (action === "add-model") {
     const item = group.items[settingsActiveProviderId];
     if (item.managed) return;
@@ -1599,16 +1694,38 @@ settingsModal.addEventListener("input", (event) => {
   if (item.managed || isKlingProviderItem(item)) return;
   const field = t.dataset.settingsField;
   if (field) {
-    item[field] = t.value;
+    item[field] = t.type === "checkbox" ? Boolean(t.checked) : t.value;
     return;
   }
   const modelField = t.dataset.settingsModelField;
   if (modelField) {
     const idx = Number(t.dataset.idx);
     if (Number.isInteger(idx) && item.models[idx]) {
-      item.models[idx][modelField] = t.value;
+      const model = item.models[idx];
+      if (modelField === "upscale") {
+        const capabilities = Array.isArray(model.capabilities) ? [...model.capabilities] : [];
+        const next = capabilities.filter((value) => String(value).toLowerCase() !== "upscale");
+        if (t.checked) next.push("upscale");
+        model.capabilities = next;
+        if (!model.capabilities.length) delete model.capabilities;
+      } else if (modelField === "maxScale" || modelField === "maxEdge") {
+        const number = Number(t.value);
+        if (Number.isFinite(number) && number > 0) model[modelField] = number;
+        else delete model[modelField];
+      } else {
+        model[modelField] = t.value;
+      }
     }
   }
+});
+
+settingsModal.addEventListener("change", (event) => {
+  const target = event.target;
+  if (!settingsDraft || target.dataset.settingsField !== "adapter") return;
+  const item = settingsDraft[settingsActiveKind]?.items?.[settingsActiveProviderId];
+  if (!item || item.managed || isKlingProviderItem(item)) return;
+  item.adapter = target.value;
+  renderSettingsModal();
 });
 
 const KIND_LABELS_CLIENT = { chat: "聊天", image: "图片", video: "视频" };
@@ -1651,7 +1768,7 @@ async function saveSettingsDraft() {
 // ===== 快速切换 API 平台 =====
 const NODE_KIND_MAP_CLIENT = {
   llmConfig: "chat", storyboardAssistant: "chat", promptOptimizer: "chat",
-  imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", styleTransferConfig: "image", materialTransferConfig: "image", productBackgroundConfig: "image", characterTurnaroundConfig: "image", characterEnvironmentConfig: "image", faceSwapConfig: "image", seedreamEdit: "image", layerSeparation: "image",
+  imageConfig: "image", storyboardConfig: "image", templateImageConfig: "image", imageExpand: "image", imageUpscale: "image", styleTransferConfig: "image", materialTransferConfig: "image", productBackgroundConfig: "image", characterTurnaroundConfig: "image", characterEnvironmentConfig: "image", faceSwapConfig: "image", seedreamEdit: "image", layerSeparation: "image",
   videoConfig: "video",
 };
 
@@ -1670,6 +1787,22 @@ function buildProvidersKeepPayload() {
         apiKey: API_KEY_KEEP_SENTINEL_CLIENT,
         defaultModel: it.defaultModel || "",
         models: Array.isArray(it.models) ? it.models : [],
+        ...(it.capabilities ? { capabilities: it.capabilities } : {}),
+        ...(it.maxScale ? { maxScale: it.maxScale } : {}),
+        ...(it.maxEdge ? { maxEdge: it.maxEdge } : {}),
+        ...(it.maxPixels ? { maxPixels: it.maxPixels } : {}),
+        ...(it.upscalePath ? { upscalePath: it.upscalePath } : {}),
+        ...(it.upscaleProtocol ? { upscaleProtocol: it.upscaleProtocol } : {}),
+        ...(it.workflowPath ? { workflowPath: it.workflowPath } : {}),
+        ...(it.workflow ? { workflow: it.workflow } : {}),
+        ...(it.autoStart !== undefined ? { autoStart: Boolean(it.autoStart) } : {}),
+        ...(it.keepAlive !== undefined ? { keepAlive: Boolean(it.keepAlive) } : {}),
+        ...(it.installDir ? { installDir: it.installDir } : {}),
+        ...(it.pythonPath ? { pythonPath: it.pythonPath } : {}),
+        ...(it.port ? { port: Number(it.port) } : {}),
+        ...(it.readyTimeoutMs ? { readyTimeoutMs: Number(it.readyTimeoutMs) } : {}),
+        ...(it.readyPollMs ? { readyPollMs: Number(it.readyPollMs) } : {}),
+        ...(Array.isArray(it.launchArgs) ? { launchArgs: it.launchArgs } : {}),
       };
     }
     out[kind] = { default: g.default, items };
@@ -2617,6 +2750,7 @@ function render() {
   state.groups.forEach((group) => world.append(renderGroup(group)));
   hydrateAssetImages();
   setupExpandStages();
+  setupUpscaleStages();
   setupCompareStages();
   observeNodeResizesForGroups();
   zoomLabel.textContent = `${Math.round(state.view.zoom * 100)}%`;
@@ -2957,6 +3091,7 @@ function renderNode(node) {
   wrap.className = "node";
   wrap.dataset.id = node.id;
   wrap.dataset.type = node.type;
+  if (node.data.caseWorkflow) wrap.dataset.caseWorkflow = "true";
   if (node.data.director) wrap.dataset.director = "true";
   wrap.style.setProperty("--x", `${node.position.x}px`);
   wrap.style.setProperty("--y", `${node.position.y}px`);
@@ -3201,6 +3336,11 @@ function renderDirectorCard(node) {
 }
 
 function renderNodeBody(node) {
+  if (node.type === "audio") {
+    const source = typeof node.data.url === "string" ? node.data.url : "";
+    const display = isIndexedImageSource(source) ? imageAssetObjectUrls.get(getIndexedImageId(source)) || "" : source;
+    return `<audio class="result-audio" controls preload="metadata" data-asset-url="${escapeHtml(source)}" ${display ? `src="${escapeHtml(display)}"` : ""}></audio>${renderMediaDownloadButton(node)}`;
+  }
   if (node.type === "text") {
     return `
       <div class="prompt-editor">
@@ -3758,6 +3898,54 @@ function renderNodeBody(node) {
     `;
   }
 
+  if (node.type === "imageUpscale") {
+    const slots = getImageReferenceSlots(node.id).filter((slot) => slot.node?.type === "image");
+    const src = typeof slots[0]?.node?.data?.url === "string" && slots[0].node.data.url ? slots[0].node.data.url : "";
+    if (!src) {
+      return `
+        <div class="upscale-empty">
+          <strong>图像放大</strong>
+          <div class="compare-hint">从一个「图片」节点连入原图，只处理一张图片</div>
+          <div class="node-indicators"><span class="indicator">原图 ○</span></div>
+        </div>
+      `;
+    }
+    const d = node.data;
+    const target = upscaleTargetSize(node);
+    const provider = getProviderItem("image", d.providerId);
+    const modelReady = supportsUpscaleModel(d.providerId, d.model);
+    const comfyWorkflowReady = provider?.adapter !== "comfyui" || Boolean(provider.workflowPath || provider.workflow);
+    const configured = (provider?.configured && comfyWorkflowReady) || isKlingProviderItem(provider);
+    const comfyStatusLabels = {
+      checking: "检查 ComfyUI",
+      starting: "启动 ComfyUI",
+      ready: "ComfyUI 已就绪",
+      running: "ComfyUI 放大中",
+      done: "已完成",
+      error: "上次失败，可重试",
+    };
+    const comfyStatus = provider?.adapter === "comfyui" && d.upscaleStatus ? comfyStatusLabels[d.upscaleStatus] || d.upscaleStatus : "";
+    const sourceLabel = d.sourceWidth && d.sourceHeight ? `${d.sourceWidth} × ${d.sourceHeight}` : "读取中…";
+    const targetLabel = target?.error ? "尺寸不可用" : target ? `${target.width} × ${target.height}${target.limited ? " · 已按上限调整" : ""}` : "读取中…";
+    return `
+      <div class="upscale-preview">
+        <img class="generated-image upscale-img" data-asset-url="${escapeHtml(src)}" src="${escapeHtml(imageDisplaySource(src) || transparentPixel)}" alt="原图" draggable="false">
+      </div>
+      <div class="node-indicators">
+        <span class="indicator ready upscale-source-size">原图 ${escapeHtml(sourceLabel)}</span>
+        <span class="indicator ${target?.error ? "error" : "ready"} upscale-target-size">目标 ${escapeHtml(targetLabel)}</span>
+        ${comfyStatus ? `<span class="indicator ${d.upscaleStatus === "error" ? "error" : "ready"} upscale-comfy-status">${escapeHtml(comfyStatus)}</span>` : ""}
+      </div>
+      <div class="node-row"><span>放大倍数</span><select data-field="scale">${optionPairs([["2", "2×"], ["4", "4×"]], String(d.scale || 2))}</select></div>
+      <div class="node-row"><span>输出格式</span><select data-field="outputFormat">${optionPairs([["png", "PNG · 保留透明"], ["jpeg", "JPEG · 文件更小"], ["webp", "WebP · 文件更小"]], d.outputFormat || "png")}</select></div>
+      <div class="node-row"><span>超分模型</span><select data-field="model">${modelOptionsForNode("image", d.providerId, d.model, "upscale")}</select></div>
+      ${!modelReady ? '<div class="storyboard-warn">当前图片模型未声明支持超分，请在 Provider 模型池中开启「upscale」能力。</div>' : provider?.adapter === "comfyui" && !comfyWorkflowReady ? '<div class="storyboard-warn">请先在 ComfyUI Provider 中填写 Save API Format 工作流路径。</div>' : !configured ? '<div class="storyboard-warn">超分 Provider 尚未配置，保存设置后才能提交。</div>' : ""}
+      ${target?.error ? `<div class="node-inline-error upscale-size-error">${escapeHtml(target.error)}</div>` : ""}
+      ${d.upscaleError ? `<div class="node-inline-error">${escapeHtml(d.upscaleError)}</div>` : ""}
+      <button class="node-button" data-node-action="generate-upscale" ${modelReady && configured && !target?.error && !activeImageUpscaleRuns.has(node.id) ? "" : "disabled"}>${activeImageUpscaleRuns.has(node.id) ? "处理中…" : "生成放大图"}</button>
+    `;
+  }
+
   if (node.type === "video") {
     const aspect = ratioToCss(node.data.ratio);
     let media;
@@ -3825,6 +4013,7 @@ function renderImageMedia(node) {
       ? ""
       : `<a href="${url}" target="_blank" rel="noreferrer">打开原图</a>`;
     return `
+      ${node.data.error ? `<div class="node-inline-error">本次生成失败：${escapeHtml(node.data.error)}<br>下方保留上次结果。</div>` : ""}
       <div class="image-preview has-image" style="--preview-bg:${node.data.gradient || ""}">
         <img class="generated-image" src="${displayUrl}" data-asset-url="${escapeHtml(source)}" alt="${escapeHtml(node.data.label || "生成图片")}" loading="lazy" referrerpolicy="no-referrer">
         <div class="image-load-error">
@@ -3905,7 +4094,8 @@ async function getImageAsset(assetId) {
 }
 
 function shouldPersistImageSource(source) {
-  return /^data:image\//i.test(String(source || "")) && String(source).length > 120000;
+  // Inline image bytes of every size belong in IndexedDB, never project JSON.
+  return /^data:image\//i.test(String(source || ""));
 }
 
 async function persistImageSource(source) {
@@ -3918,7 +4108,7 @@ async function persistImageSource(source) {
     return `${imageAssetPrefix}${id}`;
   } catch (error) {
     console.warn("Failed to persist image asset", error);
-    return source;
+    throw new Error("本地图片素材保存失败，请检查浏览器存储空间后重试");
   }
 }
 
@@ -4985,7 +5175,7 @@ async function openModel3dEditor(nodeId, { allowEmpty = false } = {}) {
           showToast("参考帧已输出到画布");
           return;
         }
-        // 始终写 IndexedDB（不走 persistImageSource 的 120KB 阈值），避免 base64 进 localStorage 撑爆配额。
+        // 图片字节写 IndexedDB，节点只保存素材引用。
         const blob = await (await fetch(dataUrl)).blob();
         const sentinel = await persistImageBlob(blob);
         if (!isCurrentEditor()) return;
@@ -5121,7 +5311,7 @@ function blobToDataUrl(blob) {
 }
 
 function hydrateAssetImages() {
-  document.querySelectorAll(".generated-image[data-asset-url], .image-input-thumbnail[data-asset-url], .product-background-slot img[data-asset-url], .replica-slot [data-asset-url], video.result-video[data-asset-url]").forEach((el) => {
+  document.querySelectorAll(".generated-image[data-asset-url], .image-input-thumbnail[data-asset-url], .product-background-slot img[data-asset-url], .replica-slot [data-asset-url], video.result-video[data-asset-url], audio.result-audio[data-asset-url]").forEach((el) => {
     const assetId = getIndexedImageId(el.dataset.assetUrl);
     if (!assetId || el.dataset.assetLoading === "1") return;
     if (imageAssetObjectUrls.has(assetId)) {
@@ -5348,8 +5538,7 @@ function updateNode(id, patch) {
   render();
 }
 
-function addNode(type, position = getViewportCenter(), data = {}) {
-  commitHistory();
+function createCanvasNode(type, position, data = {}) {
   const defaults = {
     text: { label: "文本节点", content: "" },
     llmConfig: { label: "LLM 文本生成", model: getDefaultModel("chat") },
@@ -5371,6 +5560,7 @@ function addNode(type, position = getViewportCenter(), data = {}) {
     image: { label: "图片节点", url: false },
     imageCompare: { label: "图片对比", split: 50 },
     imageExpand: { label: "图片扩展", padL: 0, padR: 0, padT: 0, padB: 0, lockRatio: false, prompt: "", model: getDefaultModel("image") },
+    imageUpscale: { label: "图像放大", providerId: getDefaultUpscaleProviderAndModel().providerId, model: getDefaultUpscaleProviderAndModel().model, scale: 2, outputFormat: "png", sourceWidth: 0, sourceHeight: 0, upscaleStatus: "" },
     styleTransferConfig: {
       label: "风格迁移",
       model: getDefaultModel("image"),
@@ -5466,6 +5656,7 @@ function addNode(type, position = getViewportCenter(), data = {}) {
     videoConfig: { label: "视频生成", model: getDefaultModel("video"), videoMode: "reference", ratio: "16:9", resolution: "720p", seconds: 8 },
     videoReplicaConfig: { label: "爆款视频复刻", ...window.VideoReplica.selectModel(getProviderGroup("video")), replacementMode: "person", targetPerson: "", extra: "", resolution: "720p", videoMode: "reference" },
     video: { label: "视频节点", url: false },
+    audio: { label: "音频素材", url: false },
     storyboardConfig: {
       label: "故事板生成",
       pathway: "temporal-dense-meta",
@@ -5509,6 +5700,12 @@ function addNode(type, position = getViewportCenter(), data = {}) {
     data: { ...defaults[type], ...data },
   };
   ensureNodeProvider(node);
+  return node;
+}
+
+function addNode(type, position = getViewportCenter(), data = {}) {
+  const node = createCanvasNode(type, position, data);
+  commitHistory();
   state.nodes = [...state.nodes, node];
   setSelectedNodes([node.id]);
   nodeMenu.hidden = true;
@@ -5549,6 +5746,89 @@ function removeEdge(edgeId) {
   render();
   return true;
 }
+
+// Case workflows share the ordinary node factory, provider selection, history and
+// asset store. They never submit a generation request while building the graph.
+const canvasCasesBridge = {
+  snapshot() {
+    return {
+      projectId: projectLibrary.activeProjectId,
+      project: structuredClone(getActiveProject()),
+      nodes: structuredClone(state.nodes),
+      groups: structuredClone(state.groups),
+      selected: [...selectedNodeIds],
+    };
+  },
+  assertProject(projectId) {
+    if (projectLibrary.activeProjectId !== projectId || appShell.hidden) throw new Error("项目已切换，请重新打开创作案例");
+  },
+  async persist(blob) {
+    if (!/^(image|video|audio)\//.test(blob?.type || "")) throw new Error("仅支持图片、视频和音频文件");
+    const id = makeId();
+    await putImageAsset({ id, blob, type: blob.type, createdAt: new Date().toISOString() });
+    imageAssetObjectUrls.set(id, URL.createObjectURL(blob));
+    return `${imageAssetPrefix}${id}`;
+  },
+  async discard(sources) {
+    if (!sources.length) return;
+    const db = await openImageAssetDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction("images", "readwrite");
+      for (const source of sources) {
+        const id = getIndexedImageId(source);
+        if (id) tx.objectStore("images").delete(id);
+      }
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+    for (const source of sources) {
+      const id = getIndexedImageId(source);
+      const url = imageAssetObjectUrls.get(id);
+      if (url) URL.revokeObjectURL(url);
+      imageAssetObjectUrls.delete(id);
+    }
+  },
+  drawable: async (source) => loadImageElement(await resolveDrawableSrc(source)),
+  display: (source) => getDisplayImageUrl(source),
+  readBlob: readMediaDownloadBlob,
+  extension: mediaDownloadExtension,
+  commit(recipe, projectId) {
+    this.assertProject(projectId);
+    if (!recipe.nodes.length) throw new Error("没有可添加的素材");
+    const origin = getViewportCenter();
+    viewport.scrollTop = 0;
+    viewport.scrollLeft = 0;
+    const map = new Map();
+    const nodes = recipe.nodes.map((item) => {
+      if (!nodeSizes[item.type]) throw new Error("不支持的案例节点");
+      const height = { image: 500, imageConfig: 520, videoConfig: 620 }[item.type];
+      const node = createCanvasNode(item.type, { x: origin.x + item.position.x, y: origin.y + item.position.y }, { ...item.data, ...(height ? { height } : {}), caseWorkflow: true });
+      map.set(item.id, node.id);
+      return node;
+    });
+    for (const node of nodes) {
+      if (map.has(node.data.sourceNodeId)) node.data.sourceNodeId = map.get(node.data.sourceNodeId);
+    }
+    const edges = recipe.edges.map((edge) => {
+      if (!map.has(edge.source) || !map.has(edge.target)) throw new Error("案例连接不完整");
+      return { ...edge, id: makeId(), source: map.get(edge.source), target: map.get(edge.target) };
+    });
+    const groups = recipe.groups.map((group) => ({ id: makeId(), label: group.label, nodeIds: group.nodeIds.map((id) => map.get(id)) }));
+    commitHistory();
+    state.nodes.push(...nodes);
+    state.edges.push(...edges);
+    state.groups.push(...groups);
+    setSelectedNodes(nodes.map((n) => n.id));
+    const maxX = Math.max(...nodes.map((n) => n.position.x + getNodeSize(n).width));
+    const maxY = Math.max(...nodes.map((n) => n.position.y + getNodeSize(n).height));
+    const zoom = clamp(Math.min((viewport.clientWidth - 100) / (maxX - origin.x), (viewport.clientHeight - 120) / (maxY - origin.y)), 0.1, 1);
+    state.view = { zoom, x: viewport.clientWidth / 2 - (origin.x + maxX) / 2 * zoom, y: viewport.clientHeight / 2 - (origin.y + maxY) / 2 * zoom };
+    saveState();
+    render();
+    showToast(`已添加 ${nodes.length} 个节点，可撤销整组操作`);
+  },
+  toast: showToast,
+};
 
 function removeNode(id) {
   removeNodes([id]);
@@ -5649,23 +5929,10 @@ async function apiFetch(path, options = {}) {
       || data?.message
       || data?.raw
       || `HTTP ${response.status}`;
-    if (response.status === 401 && typeof bootstrap === "function") {
-      currentAuthUser = null;
-      renderUserBadge();
-      appShell.hidden = true;
-      projectHome.hidden = true;
-      authOverlay.hidden = false;
-    }
-    if (response.status === 402) {
-      void refreshAuthUser();
-    }
     const error = new Error(message);
     error.status = response.status;
     error.statusCode = response.status;
     throw error;
-  }
-  if (response.ok && path.startsWith("/api/") && !path.startsWith("/api/auth/") && !path.startsWith("/api/billing/")) {
-    void refreshAuthUser();
   }
   return data;
 }
@@ -6276,14 +6543,6 @@ function generateGradient(seed = "") {
 // 安全审核拒绝（多为参考图含受版权保护的角色，或提示词要求写实化）最常见，单独友好化。
 function friendlyImageError(message) {
   const raw = String(message || "");
-  // 本地积分不足（后端 db.adjustBalance 抛的 402「余额不足」），请求还没发往上游，跟上游账单无关
-  if (/^余额不足$/.test(raw.trim())) {
-    return (
-      "⚠️ 你的账号积分不足\n" +
-      "当前账号余额不够支付本次生成，扣费这步就没通过（请求未发往上游）。\n" +
-      "建议：用 admin 账号在「管理」面板给本账号充值积分后重试。"
-    );
-  }
   if (/safety system|rejected by the safety|content[_\s-]?policy|moderation/i.test(raw)) {
     const reqMatch = raw.match(/req_[A-Za-z0-9]+/);
     const reqNote = reqMatch ? `\n请求 ID：${reqMatch[0]}` : "";
@@ -7683,6 +7942,8 @@ function inferConnection(sourceId, targetId) {
   if (target?.type === "imageCompare" && source?.type === "image") return { type: "imageOrder", label: "对比图" };
   if (source?.type === "imageExpand" && target?.type === "image") return { type: "output", label: "输出" };
   if (target?.type === "imageExpand" && source?.type === "image") return { type: "imageOrder", label: "原图" };
+  if (source?.type === "imageUpscale" && target?.type === "image") return { type: "output", label: "放大结果" };
+  if (target?.type === "imageUpscale" && source?.type === "image") return { type: "imageOrder", label: "原图" };
   if (source?.type === "styleTransferConfig" && target?.type === "image") return { type: "output", label: "输出" };
   if (target?.type === "styleTransferConfig" && ["image", "layerGroup", "model3dPreview"].includes(source?.type)) {
     const existing = getImageReferenceSlots(targetId).length;
@@ -7771,10 +8032,14 @@ const connectionDropTargets = {
     { type: "faceSwapConfig", label: "+ 换脸" },
     { type: "imageCompare", label: "+ 图片对比" },
     { type: "imageExpand", label: "+ 图片扩展" },
+    { type: "imageUpscale", label: "+ 图像放大" },
     { type: "videoConfig", label: "+ 文生视频(用作首帧)" },
   ],
   imageExpand: [
     { type: "image", label: "+ 扩展结果" },
+  ],
+  imageUpscale: [
+    { type: "image", label: "+ 放大结果" },
   ],
   imageConfig: [
     { type: "image", label: "+ 图像结果" },
@@ -7934,6 +8199,10 @@ async function refreshNode(id) {
   }
   if (node.type === "imageExpand") {
     generateImageExpand(id);
+    return;
+  }
+  if (node.type === "imageUpscale") {
+    generateImageUpscale(id);
     return;
   }
   if (node.type === "faceSwapConfig") {
@@ -8410,6 +8679,7 @@ async function generateVideo(configId) {
 const activeMediaDownloads = new Set();
 
 function mediaDownloadLabel(node) {
+  if (node.type === "audio") return "下载音频";
   return node.type === "image" ? "下载图片" : node.data.directorSource ? "下载预演 MP4" : "下载视频";
 }
 
@@ -8423,7 +8693,9 @@ function renderMediaDownloadButton(node) {
 async function mediaDownloadExtension(blob, kind) {
   if (!blob?.size) throw new Error("素材为空或已丢失，请重新载入");
   const mime = String(blob.type || "").split(";")[0].toLowerCase().trim();
-  const types = kind === "video"
+  const types = kind === "audio"
+    ? { "audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/ogg": "ogg", "audio/mp4": "m4a", "audio/aac": "aac", "audio/flac": "flac", "audio/webm": "webm" }
+    : kind === "video"
     ? { "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov", "video/ogg": "ogv", "video/x-matroska": "mkv" }
     : { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif", "image/avif": "avif", "image/svg+xml": "svg", "image/bmp": "bmp", "image/tiff": "tiff" };
   if (types[mime]) return types[mime];
@@ -8479,7 +8751,7 @@ async function readMediaDownloadBlob(source, kind, project) {
 }
 
 async function downloadMediaSource(source, kind, label, button = null) {
-  if (typeof source !== "string" || !source || !["image", "video"].includes(kind)) { showToast("素材尚未生成完成"); return; }
+  if (typeof source !== "string" || !source || !["image", "video", "audio"].includes(kind)) { showToast("素材尚未生成完成"); return; }
   const key = `${kind}:${source}`;
   if (activeMediaDownloads.has(key)) return;
   activeMediaDownloads.add(key);
@@ -9061,6 +9333,7 @@ function handleContextAction(action) {
     "add-layer-separation": "layerSeparation",
     "add-image-compare": "imageCompare",
     "add-image-expand": "imageExpand",
+    "add-image-upscale": "imageUpscale",
     "add-image": "image",
     "add-video": "video",
     "add-model3d": "model3dPreview",
@@ -9285,6 +9558,92 @@ function fitExpandDimensions(width, height, model) {
   return { valid: true, width: Math.max(1, Math.round(w)), height: Math.max(1, Math.round(h)), error: "" };
 }
 
+function upscaleModelSpec(providerId, model) {
+  const provider = getProviderItem("image", providerId);
+  const entry = (provider?.models || []).find((item) => String(item?.id || "") === String(model || ""));
+  return {
+    ...(entry || {}),
+    ...(provider?.capabilities ? { capabilities: [...new Set([...(provider.capabilities || []), ...(entry?.capabilities || [])])] } : {}),
+    maxScale: Number(entry?.maxScale || provider?.maxScale || 4),
+    maxEdge: Number(entry?.maxEdge || provider?.maxEdge || 8192),
+    maxPixels: Number(entry?.maxPixels || provider?.maxPixels || 0),
+  };
+}
+
+function supportsUpscaleModel(providerId, model) {
+  const spec = upscaleModelSpec(providerId, model);
+  const provider = getProviderItem("image", providerId);
+  const known = (provider?.models || []).some((entry) => String(entry?.id || "") === String(model || ""));
+  return known && Array.isArray(spec.capabilities) && spec.capabilities.map(String).map((value) => value.toLowerCase()).includes("upscale");
+}
+
+function fitUpscaleDimensions(width, height, scale = 2, spec = {}) {
+  const sourceWidth = Number(width);
+  const sourceHeight = Number(height);
+  const requestedScale = Number(scale);
+  if (!(sourceWidth > 0) || !(sourceHeight > 0)) return { valid: false, width: 0, height: 0, limited: false, error: "无法读取原图尺寸" };
+  if (![2, 4].includes(requestedScale)) return { valid: false, width: 0, height: 0, limited: false, error: "放大倍数只支持 2x 或 4x" };
+  const maxScale = Number(spec.maxScale || 4);
+  if (requestedScale > maxScale) return { valid: false, width: 0, height: 0, limited: false, error: `当前模型最多支持 ${maxScale}x 放大` };
+  let targetWidth = Math.max(1, Math.round(sourceWidth * requestedScale));
+  let targetHeight = Math.max(1, Math.round(sourceHeight * requestedScale));
+  let limited = false;
+  const maxEdge = Number(spec.maxEdge || 0);
+  if (maxEdge > 0 && Math.max(targetWidth, targetHeight) > maxEdge) {
+    const ratio = maxEdge / Math.max(targetWidth, targetHeight);
+    targetWidth = Math.max(1, Math.round(targetWidth * ratio));
+    targetHeight = Math.max(1, Math.round(targetHeight * ratio));
+    targetWidth = Math.min(targetWidth, maxEdge);
+    targetHeight = Math.min(targetHeight, maxEdge);
+    limited = true;
+  }
+  const maxPixels = Number(spec.maxPixels || 0);
+  if (maxPixels > 0 && targetWidth * targetHeight > maxPixels) {
+    const ratio = Math.sqrt(maxPixels / (targetWidth * targetHeight));
+    targetWidth = Math.max(1, Math.floor(targetWidth * ratio));
+    targetHeight = Math.max(1, Math.floor(targetHeight * ratio));
+    while (targetWidth * targetHeight > maxPixels) {
+      if (targetWidth >= targetHeight) targetWidth -= 1;
+      else targetHeight -= 1;
+    }
+    limited = true;
+  }
+  return { valid: true, width: targetWidth, height: targetHeight, limited, error: "" };
+}
+
+function upscaleTargetSize(node) {
+  const width = Number(node?.data?.sourceWidth || node?.data?._imgW || 0);
+  const height = Number(node?.data?.sourceHeight || node?.data?._imgH || 0);
+  if (!(width > 0) || !(height > 0)) return null;
+  return fitUpscaleDimensions(width, height, Number(node.data.scale || 2), upscaleModelSpec(node.data.providerId, node.data.model));
+}
+
+function setupUpscaleStages() {
+  document.querySelectorAll(".upscale-preview").forEach((stage) => {
+    const node = getNode(stage.closest(".node")?.dataset.id);
+    const img = stage.querySelector(".upscale-img");
+    if (!node || !img) return;
+    const update = () => {
+      if (!(img.naturalWidth > 2) || !(img.naturalHeight > 2)) return;
+      const changed = node.data.sourceWidth !== img.naturalWidth || node.data.sourceHeight !== img.naturalHeight;
+      node.data.sourceWidth = img.naturalWidth;
+      node.data.sourceHeight = img.naturalHeight;
+      const target = upscaleTargetSize(node);
+      const sourceLabel = stage.parentElement.querySelector(".upscale-source-size");
+      const targetLabel = stage.parentElement.querySelector(".upscale-target-size");
+      if (sourceLabel) sourceLabel.textContent = `原图 ${img.naturalWidth} × ${img.naturalHeight}`;
+      if (targetLabel) {
+        targetLabel.textContent = target?.error ? `目标 ${target.error}` : target ? `目标 ${target.width} × ${target.height}${target.limited ? " · 已按上限调整" : ""}` : "目标 读取中…";
+        targetLabel.classList.toggle("error", Boolean(target?.error));
+        targetLabel.classList.toggle("ready", !target?.error);
+      }
+      if (changed) saveState();
+    };
+    if (img.complete) update();
+    img.addEventListener("load", update);
+  });
+}
+
 function expandTargetSize(node) {
   const ow = Number(node.data._imgW) || 0;
   const oh = Number(node.data._imgH) || 0;
@@ -9483,6 +9842,92 @@ async function requestExpandImage(config, prompt, compositeDataUrl, size) {
   return persistImageSource(source);
 }
 
+async function requestImageUpscale(config, source, target) {
+  const data = await apiFetch("/api/images/upscale", {
+    method: "POST",
+    body: JSON.stringify({
+      providerId: config.data.providerId || "",
+      model: config.data.model,
+      image: source,
+      scale: Number(config.data.scale || 2),
+      targetWidth: target.width,
+      targetHeight: target.height,
+      outputFormat: config.data.outputFormat || "png",
+    }),
+  });
+  const sourceUrl = extractImageSource(data);
+  if (!sourceUrl) throw new Error("超分接口未返回可显示的图片地址或 base64 数据");
+  return persistImageSource(sourceUrl);
+}
+
+async function generateImageUpscale(configId) {
+  const config = getNode(configId);
+  if (!config || config.type !== "imageUpscale" || activeImageUpscaleRuns.has(configId)) return;
+  const slots = getImageReferenceSlots(configId).filter((slot) => slot.node?.type === "image");
+  if (slots.length !== 1) {
+    showToast(slots.length ? "图像放大只能接入一张原图" : "先连入一张原图");
+    return;
+  }
+  if (!supportsUpscaleModel(config.data.providerId, config.data.model)) {
+    showToast("当前 Provider/模型未声明支持超分辨率");
+    return;
+  }
+  const provider = getProviderItem("image", config.data.providerId);
+  const comfyConfigured = provider?.adapter !== "comfyui" || Boolean(provider.workflowPath || provider.workflow);
+  if ((!provider?.configured || !comfyConfigured) && !isKlingProviderItem(provider)) {
+    showToast("请先在 API 设置中配置超分 Provider");
+    return;
+  }
+
+  activeImageUpscaleRuns.add(configId);
+  updateNode(configId, { executed: false, upscaleError: "" });
+  let imageId = null;
+  const setUpscaleStatus = (status) => updateNode(configId, { upscaleStatus: status });
+  try {
+    const [source] = await resolveImageReferenceSlots(slots);
+    const image = await loadImageElement(source);
+    config.data.sourceWidth = image.naturalWidth;
+    config.data.sourceHeight = image.naturalHeight;
+    updateNode(configId, { sourceWidth: image.naturalWidth, sourceHeight: image.naturalHeight });
+    const target = upscaleTargetSize(config);
+    if (!target?.valid) throw new Error(target?.error || "目标尺寸无效");
+
+    const existing = findOutputImageNode(configId);
+    imageId = existing?.id || null;
+    if (!imageId) {
+      imageId = addNode("image", { x: config.position.x + 390, y: config.position.y }, { label: "放大结果", loading: true, model: config.data.model });
+      addEdge(configId, imageId, "output", { label: "放大结果" });
+    } else {
+      updateNode(imageId, { loading: true, error: "" });
+    }
+    if (provider?.adapter === "comfyui") {
+      setUpscaleStatus("checking");
+      await apiFetch(`/api/comfyui/test?providerId=${encodeURIComponent(config.data.providerId || "")}`, {
+        method: "POST",
+        body: JSON.stringify({ providerId: config.data.providerId || "" }),
+      });
+      setUpscaleStatus("ready");
+      showProcessing("ComfyUI 已就绪，正在加载放大模型...");
+    } else {
+      showProcessing("正在放大图片...");
+    }
+    setUpscaleStatus("running");
+    const url = await requestImageUpscale(config, source, target);
+    updateNode(imageId, { loading: false, url, model: config.data.model, scale: config.data.scale, error: "", gradient: generateGradient(`upscale-${config.data.scale}`) });
+    updateNode(configId, { executed: true, lastTargetWidth: target.width, lastTargetHeight: target.height, upscaleStatus: "done" });
+    hideProcessing("图像放大完成");
+    void recordProjectHistory({ type: "image", url, prompt: `[超分 ${config.data.scale}x · ${target.width}x${target.height}]`, model: config.data.model });
+  } catch (error) {
+    if (imageId) updateNode(imageId, { loading: false, error: friendlyImageError(error.message) });
+    updateNode(configId, { upscaleStatus: "error", upscaleError: friendlyImageError(error.message) });
+    processing.hidden = true;
+    showToast(`图像放大失败：${error.message}`);
+  } finally {
+    activeImageUpscaleRuns.delete(configId);
+    render();
+  }
+}
+
 async function generateImageExpand(configId) {
   const config = getNode(configId);
   if (!config || config.type !== "imageExpand") return;
@@ -9575,7 +10020,7 @@ viewport.addEventListener("pointerdown", (event) => {
   if (event.button !== 0) return;
   if (event.target.closest("[contenteditable='true']")) return;
 
-  const interactive = event.target.closest("button, input, textarea, select, a, summary");
+  const interactive = event.target.closest("button, input, textarea, select, a, summary, audio, video");
   const resizeHandle = event.target.closest(".node-resize-handle");
   if (resizeHandle) {
     event.preventDefault();
@@ -10173,6 +10618,7 @@ document.addEventListener("click", async (event) => {
     if (nodeAction === "generate-storyboard") generateStoryboard(id);
     if (nodeAction === "generate-template-image") generateTemplateImage(id);
     if (nodeAction === "generate-expand") generateImageExpand(id);
+    if (nodeAction === "generate-upscale") generateImageUpscale(id);
     if (nodeAction === "generate-faceswap") generateFaceSwap(id);
     if (nodeAction === "generate-style-transfer") generateStyleTransfer(id);
     if (nodeAction === "generate-material-transfer") generateMaterialTransfer(id);
@@ -10250,6 +10696,11 @@ document.addEventListener("click", async (event) => {
   }
 
   if (!action) return;
+  if (action === "canvas-cases" || action === "export-canvas-media") {
+    nodeMenu.hidden = true;
+    window.CanvasCasesUI.open(canvasCasesBridge, action === "export-canvas-media" ? "export" : "product");
+    return;
+  }
   if (action === "home") {
     showProjectHome();
     return;
@@ -10298,6 +10749,7 @@ document.addEventListener("click", async (event) => {
   if (action === "add-layer-separation") addNode("layerSeparation");
   if (action === "add-image-compare") addNode("imageCompare");
   if (action === "add-image-expand") addNode("imageExpand");
+  if (action === "add-image-upscale") addNode("imageUpscale");
   if (action === "add-model3d") addNode("model3dPreview");
   if (action === "add-director3d") addDirector3dNode();
   if (action === "zoom-in") setView({ ...state.view, zoom: state.view.zoom * 1.18 });
@@ -10326,7 +10778,8 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "close-history-panel") historyPanel.hidden = true;
   if (action === "save-workflow-template") saveCurrentWorkflowAsTemplate();
-  if (action === "export-workflow-json" || action === "download") exportCurrentWorkflowJson();
+  if (action === "export-workflow-json") exportCurrentWorkflowJson();
+  if (action === "download") window.CanvasCasesUI.open(canvasCasesBridge, "export");
   if (action === "add-template-category") {
     templatePanel.hidden = false;
     createTemplateCategory();
@@ -10471,6 +10924,7 @@ function normalizeNodeModelValue(nodeType, value) {
   if (nodeType === "characterTurnaroundConfig") return normalizeModelValue("image", value);
   if (nodeType === "characterEnvironmentConfig") return normalizeModelValue("image", value);
   if (nodeType === "templateImageConfig") return normalizeModelValue("image", value);
+  if (nodeType === "imageUpscale") return normalizeModelValue("image", value);
   if (nodeType === "seedreamEdit") return normalizeModelValue("image", value);
   if (nodeType === "layerSeparation") return normalizeModelValue("image", value);
   if (nodeType === "videoConfig") return normalizeModelValue("video", value);
@@ -10610,408 +11064,12 @@ function isTypingTarget(target) {
   return Boolean(target?.closest?.("input, textarea, select, [contenteditable='true'], dialog"));
 }
 
-const authOverlay = document.createElement("div");
-authOverlay.className = "auth-overlay";
-authOverlay.hidden = true;
-authOverlay.innerHTML = `
-  <div class="auth-card">
-    <h1>登录</h1>
-    <div class="auth-tabs">
-      <button data-auth-mode="login" class="active">登录</button>
-      <button data-auth-mode="register">注册</button>
-    </div>
-    <form class="auth-form" data-auth-form>
-      <label><span>用户名</span><input type="text" name="username" autocomplete="username" required></label>
-      <label><span>密码</span><input type="password" name="password" autocomplete="current-password" required></label>
-      <button type="submit" class="primary-small">提交</button>
-      <div class="auth-error" data-auth-error></div>
-    </form>
-    <div class="auth-hint">默认管理员 <code>admin / admin1234</code>（可在 .env 改 ADMIN_PASSWORD）</div>
-  </div>
-`;
-document.body.append(authOverlay);
-
-const userBadge = document.createElement("div");
-userBadge.className = "user-badge";
-userBadge.hidden = true;
-userBadge.innerHTML = `
-  <span class="user-badge-name" data-user-name></span>
-  <span class="user-badge-balance" data-user-balance>0</span>
-  <button class="ghost-small" data-action="open-account">个人中心</button>
-  <button class="ghost-small" data-action="open-admin" data-admin-only hidden>管理后台</button>
-  <button class="ghost-small" data-action="logout">退出</button>
-`;
-document.body.append(userBadge);
-
-const accountDialog = document.createElement("dialog");
-accountDialog.className = "account-dialog";
-accountDialog.innerHTML = `
-  <div class="account-shell">
-    <div class="account-head">
-      <strong>个人中心</strong>
-      <button class="icon-button" data-action="close-account" aria-label="关闭">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12" /></svg>
-      </button>
-    </div>
-    <div class="account-summary">
-      <div class="account-summary-cell">
-        <span>账户</span>
-        <strong data-account-username></strong>
-      </div>
-      <div class="account-summary-cell">
-        <span>当前积分</span>
-        <strong data-account-balance class="account-balance-strong">0</strong>
-      </div>
-      <div class="account-summary-cell">
-        <span>注册时间</span>
-        <strong data-account-created></strong>
-      </div>
-    </div>
-    <div class="account-tabs">
-      <button data-account-tab="transactions" class="active">积分流水</button>
-      <button data-account-tab="usage">调用记录</button>
-    </div>
-    <div class="account-list" data-account-list></div>
-  </div>
-`;
-document.body.append(accountDialog);
-
-const adminDialog = document.createElement("dialog");
-adminDialog.className = "account-dialog admin-dialog";
-adminDialog.innerHTML = `
-  <div class="account-shell">
-    <div class="account-head">
-      <strong>管理员后台</strong>
-      <button class="icon-button" data-action="close-admin" aria-label="关闭">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12" /></svg>
-      </button>
-    </div>
-    <div class="admin-grid">
-      <div class="admin-pane admin-users">
-        <div class="admin-pane-head">
-          <strong>用户列表</strong>
-          <button class="ghost-small" data-action="reload-admin">刷新</button>
-        </div>
-        <div class="admin-user-list" data-admin-user-list></div>
-      </div>
-      <div class="admin-pane admin-detail">
-        <div class="admin-pane-head">
-          <strong data-admin-detail-title>选择左侧用户查看详情</strong>
-        </div>
-        <div class="admin-credit-form" data-admin-credit-form hidden>
-          <input type="number" placeholder="正数加 / 负数扣" data-admin-amount>
-          <input type="text" placeholder="备注 (选填)" data-admin-note>
-          <button class="primary-small" data-action="apply-credit">提交</button>
-        </div>
-        <div class="admin-tabs" data-admin-tabs hidden>
-          <button data-admin-tab="transactions" class="active">积分流水</button>
-          <button data-admin-tab="usage">调用记录</button>
-        </div>
-        <div class="admin-list" data-admin-list></div>
-      </div>
-    </div>
-  </div>
-`;
-document.body.append(adminDialog);
-
-let accountActiveTab = "transactions";
-let adminSelectedUserId = null;
-let adminActiveTab = "transactions";
-
-function formatTime(value) {
-  if (!value) return "";
-  return new Date(value).toLocaleString();
-}
-
-function transactionTypeLabel(type) {
-  switch (type) {
-    case "spend": return "消耗";
-    case "refund": return "退款";
-    case "admin_credit": return "管理员加分";
-    case "admin_debit": return "管理员扣分";
-    case "register": return "注册";
-    default: return type || "";
-  }
-}
-
-async function renderAccountList() {
-  const listEl = accountDialog.querySelector("[data-account-list]");
-  listEl.textContent = "加载中...";
-  const path = accountActiveTab === "transactions" ? "/api/billing/transactions" : "/api/billing/usage";
-  try {
-    const response = await fetch(path);
-    const data = await response.json();
-    if (accountActiveTab === "transactions") {
-      const items = data?.transactions || [];
-      if (!items.length) { listEl.innerHTML = `<div class="account-empty">暂无流水</div>`; return; }
-      listEl.innerHTML = items.map((row) => `
-        <div class="account-row">
-          <span class="account-row-time">${escapeHtml(formatTime(row.created_at))}</span>
-          <span class="account-row-type">${escapeHtml(transactionTypeLabel(row.type))}</span>
-          <span class="account-row-amount ${row.amount >= 0 ? "positive" : "negative"}">${row.amount >= 0 ? "+" : ""}${row.amount}</span>
-          <span class="account-row-balance">余额 ${row.balance_after}</span>
-          <span class="account-row-desc">${escapeHtml(row.description || "")}</span>
-        </div>
-      `).join("");
-    } else {
-      const items = data?.usage || [];
-      if (!items.length) { listEl.innerHTML = `<div class="account-empty">暂无调用记录</div>`; return; }
-      listEl.innerHTML = items.map((row) => `
-        <div class="account-row">
-          <span class="account-row-time">${escapeHtml(formatTime(row.created_at))}</span>
-          <span class="account-row-type">${escapeHtml(row.route)}</span>
-          <span class="account-row-amount">${row.cost} 分</span>
-          <span class="account-row-balance">${escapeHtml(row.model || "")}</span>
-          <span class="account-row-desc">${escapeHtml(row.status || "")}</span>
-        </div>
-      `).join("");
-    }
-  } catch (error) {
-    listEl.innerHTML = `<div class="account-empty">加载失败：${escapeHtml(error.message)}</div>`;
-  }
-}
-
-function openAccountDialog() {
-  if (!currentAuthUser) return;
-  accountDialog.querySelector("[data-account-username]").textContent = currentAuthUser.username + (currentAuthUser.isAdmin ? "（管理员）" : "");
-  accountDialog.querySelector("[data-account-balance]").textContent = `${currentAuthUser.balance} 积分`;
-  accountDialog.querySelector("[data-account-created]").textContent = formatTime(currentAuthUser.createdAt);
-  accountActiveTab = "transactions";
-  accountDialog.querySelectorAll("[data-account-tab]").forEach((btn) => btn.classList.toggle("active", btn.dataset.accountTab === "transactions"));
-  if (!accountDialog.open) accountDialog.showModal();
-  void renderAccountList();
-}
-
-accountDialog.addEventListener("click", (event) => {
-  if (event.target.closest("[data-action='close-account']")) accountDialog.close();
-  const tab = event.target.closest("[data-account-tab]");
-  if (tab) {
-    accountActiveTab = tab.dataset.accountTab;
-    accountDialog.querySelectorAll("[data-account-tab]").forEach((btn) => btn.classList.toggle("active", btn === tab));
-    void renderAccountList();
-  }
-  if (event.target === accountDialog) accountDialog.close();
-});
-
-async function renderAdminUserList() {
-  const listEl = adminDialog.querySelector("[data-admin-user-list]");
-  listEl.textContent = "加载中...";
-  try {
-    const response = await fetch("/api/admin/users");
-    const data = await response.json();
-    const users = data?.users || [];
-    listEl.innerHTML = users.map((user) => `
-      <button class="admin-user-row ${user.id === adminSelectedUserId ? "active" : ""}" data-admin-user-id="${user.id}">
-        <div class="admin-user-row-name">${escapeHtml(user.username)}${user.isAdmin ? ' <span class="admin-tag">admin</span>' : ""}</div>
-        <div class="admin-user-row-balance">${user.balance} 积分</div>
-      </button>
-    `).join("");
-  } catch (error) {
-    listEl.innerHTML = `<div class="account-empty">加载失败：${escapeHtml(error.message)}</div>`;
-  }
-}
-
-async function renderAdminDetail(userId) {
-  adminSelectedUserId = userId;
-  adminDialog.querySelectorAll(".admin-user-row").forEach((btn) => btn.classList.toggle("active", Number(btn.dataset.adminUserId) === userId));
-  const listEl = adminDialog.querySelector("[data-admin-list]");
-  if (!userId) {
-    adminDialog.querySelector("[data-admin-detail-title]").textContent = "选择左侧用户查看详情";
-    adminDialog.querySelector("[data-admin-credit-form]").hidden = true;
-    adminDialog.querySelector("[data-admin-tabs]").hidden = true;
-    listEl.innerHTML = "";
-    return;
-  }
-  const target = (await (await fetch("/api/admin/users")).json())?.users?.find((u) => u.id === userId);
-  adminDialog.querySelector("[data-admin-detail-title]").textContent = target ? `${target.username} · 当前余额 ${target.balance}` : `用户 #${userId}`;
-  adminDialog.querySelector("[data-admin-credit-form]").hidden = false;
-  adminDialog.querySelector("[data-admin-tabs]").hidden = false;
-
-  listEl.textContent = "加载中...";
-  const path = adminActiveTab === "transactions"
-    ? `/api/admin/users/${userId}/transactions`
-    : `/api/admin/users/${userId}/usage`;
-  try {
-    const data = await (await fetch(path)).json();
-    if (adminActiveTab === "transactions") {
-      const items = data?.transactions || [];
-      if (!items.length) { listEl.innerHTML = `<div class="account-empty">暂无流水</div>`; return; }
-      listEl.innerHTML = items.map((row) => `
-        <div class="account-row">
-          <span class="account-row-time">${escapeHtml(formatTime(row.created_at))}</span>
-          <span class="account-row-type">${escapeHtml(transactionTypeLabel(row.type))}</span>
-          <span class="account-row-amount ${row.amount >= 0 ? "positive" : "negative"}">${row.amount >= 0 ? "+" : ""}${row.amount}</span>
-          <span class="account-row-balance">余额 ${row.balance_after}</span>
-          <span class="account-row-desc">${escapeHtml(row.description || "")}</span>
-        </div>
-      `).join("");
-    } else {
-      const items = data?.usage || [];
-      if (!items.length) { listEl.innerHTML = `<div class="account-empty">暂无调用记录</div>`; return; }
-      listEl.innerHTML = items.map((row) => `
-        <div class="account-row">
-          <span class="account-row-time">${escapeHtml(formatTime(row.created_at))}</span>
-          <span class="account-row-type">${escapeHtml(row.route)}</span>
-          <span class="account-row-amount">${row.cost} 分</span>
-          <span class="account-row-balance">${escapeHtml(row.model || "")}</span>
-          <span class="account-row-desc">${escapeHtml(row.status || "")}</span>
-        </div>
-      `).join("");
-    }
-  } catch (error) {
-    listEl.innerHTML = `<div class="account-empty">加载失败：${escapeHtml(error.message)}</div>`;
-  }
-}
-
-function openAdminDialog() {
-  if (!currentAuthUser?.isAdmin) {
-    showToast("仅管理员可访问");
-    return;
-  }
-  adminSelectedUserId = null;
-  adminActiveTab = "transactions";
-  if (!adminDialog.open) adminDialog.showModal();
-  void renderAdminUserList();
-  void renderAdminDetail(null);
-}
-
-adminDialog.addEventListener("click", async (event) => {
-  if (event.target.closest("[data-action='close-admin']")) { adminDialog.close(); return; }
-  if (event.target.closest("[data-action='reload-admin']")) { void renderAdminUserList(); return; }
-  if (event.target === adminDialog) { adminDialog.close(); return; }
-  const userRow = event.target.closest("[data-admin-user-id]");
-  if (userRow) { void renderAdminDetail(Number(userRow.dataset.adminUserId)); return; }
-  const tab = event.target.closest("[data-admin-tab]");
-  if (tab) {
-    adminActiveTab = tab.dataset.adminTab;
-    adminDialog.querySelectorAll("[data-admin-tab]").forEach((btn) => btn.classList.toggle("active", btn === tab));
-    void renderAdminDetail(adminSelectedUserId);
-    return;
-  }
-  if (event.target.closest("[data-action='apply-credit']")) {
-    if (!adminSelectedUserId) { showToast("先选用户"); return; }
-    const amount = Number(adminDialog.querySelector("[data-admin-amount]").value) || 0;
-    const note = adminDialog.querySelector("[data-admin-note]").value || "";
-    if (!amount) { showToast("金额不能为 0"); return; }
-    const target = (await (await fetch("/api/admin/users")).json())?.users?.find((u) => u.id === adminSelectedUserId);
-    if (!target) return;
-    const response = await fetch("/api/admin/credit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: target.username, amount, note }),
-    });
-    const data = await response.json();
-    if (!response.ok) { showToast(`失败：${data?.error || response.status}`); return; }
-    showToast(`已调整：${target.username} 当前 ${data.balance}`);
-    adminDialog.querySelector("[data-admin-amount]").value = "";
-    adminDialog.querySelector("[data-admin-note]").value = "";
-    void renderAdminUserList();
-    void renderAdminDetail(adminSelectedUserId);
-    if (currentAuthUser && target.username === currentAuthUser.username) void refreshAuthUser();
-  }
-});
-
-let currentAuthUser = null;
-let authMode = "login";
-
-function applyAuthMode(mode) {
-  authMode = mode;
-  authOverlay.querySelectorAll("[data-auth-mode]").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.authMode === mode);
-  });
-  authOverlay.querySelector("h1").textContent = mode === "login" ? "登录" : "注册";
-  authOverlay.querySelector("[data-auth-error]").textContent = "";
-  authOverlay.querySelector("button[type='submit']").textContent = mode === "login" ? "登录" : "注册";
-}
-
-authOverlay.addEventListener("click", (event) => {
-  const tab = event.target.closest("[data-auth-mode]");
-  if (tab) applyAuthMode(tab.dataset.authMode);
-});
-
-authOverlay.querySelector("[data-auth-form]").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.target;
-  const username = form.username.value.trim();
-  const password = form.password.value;
-  const errorEl = authOverlay.querySelector("[data-auth-error]");
-  errorEl.textContent = "";
-  try {
-    const response = await fetch(`/api/auth/${authMode}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
-    currentAuthUser = data.user;
-    renderUserBadge();
-    authOverlay.hidden = true;
-    initializeProjectManager();
-  } catch (error) {
-    errorEl.textContent = error.message;
-  }
-});
-
-userBadge.addEventListener("click", async (event) => {
-  if (event.target.closest("[data-action='logout']")) {
-    await fetch("/api/auth/logout", { method: "POST" });
-    currentAuthUser = null;
-    userBadge.hidden = true;
-    appShell.hidden = true;
-    projectHome.hidden = true;
-    authOverlay.hidden = false;
-    return;
-  }
-  if (event.target.closest("[data-action='open-account']")) {
-    openAccountDialog();
-    return;
-  }
-  if (event.target.closest("[data-action='open-admin']")) {
-    openAdminDialog();
-    return;
-  }
-});
-
-function renderUserBadge() {
-  if (!currentAuthUser) {
-    userBadge.hidden = true;
-    return;
-  }
-  userBadge.hidden = false;
-  userBadge.querySelector("[data-user-name]").textContent = currentAuthUser.username + (currentAuthUser.isAdmin ? " (admin)" : "");
-  userBadge.querySelector("[data-user-balance]").textContent = `${currentAuthUser.balance} 积分`;
-  const adminBtn = userBadge.querySelector("[data-admin-only]");
-  if (adminBtn) adminBtn.hidden = !currentAuthUser.isAdmin;
-}
-
-async function refreshAuthUser() {
-  try {
-    const response = await fetch("/api/auth/me");
-    const data = await response.json();
-    currentAuthUser = data?.user || null;
-  } catch {
-    currentAuthUser = null;
-  }
-  renderUserBadge();
-}
-
 async function bootstrap() {
-  await refreshAuthUser();
-  if (currentAuthUser) {
-    authOverlay.hidden = true;
-    await loadBackendStatus();
-    await loadStoryboardBlacklist();
-    renderTemplateLibrary();
-    applyTheme();
-    initializeProjectManager();
-  } else {
-    await loadStoryboardBlacklist();
-    appShell.hidden = true;
-    projectHome.hidden = true;
-    authOverlay.hidden = false;
-    applyAuthMode("login");
-  }
+  await loadBackendStatus();
+  await loadStoryboardBlacklist();
+  renderTemplateLibrary();
+  applyTheme();
+  initializeProjectManager();
 }
 
 bootstrap();

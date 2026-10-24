@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="./styles.css" />
     <link rel="stylesheet" href="./director3d.css" />
     <link rel="stylesheet" href="./video-replica.css" />
+    <link rel="stylesheet" href="./canvas-cases.css" />
   </head>
   <body>
     <section class="project-home" id="projectHome" aria-label="项目管理">
@@ -41,6 +42,7 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5" /></svg>
           </button>
           <button class="ghost-button director-launch" data-action="add-director3d" title="布置场景、保存机位、预览运镜">3D 导演台</button>
+          <button class="ghost-button" data-action="canvas-cases">创作案例</button>
         </div>
         <div class="header-center">
           <span class="status-dot"></span>
@@ -105,6 +107,8 @@
         </aside>
 
         <div class="node-menu" id="nodeMenu" hidden>
+          <button data-action="canvas-cases"><span class="node-menu-icon green"></span>创作案例 · 六种流程</button>
+          <button data-action="export-canvas-media"><span class="node-menu-icon blue"></span>批量导出素材</button>
           <button data-action="add-text"><span class="node-menu-icon blue"></span>文本节点</button>
           <button data-action="add-llm"><span class="node-menu-icon violet"></span>LLM 文本生成</button>
           <button data-action="add-storyboard-assistant"><span class="node-menu-icon violet"></span>分镜助手</button>
@@ -127,6 +131,7 @@
           <button data-action="add-image"><span class="node-menu-icon purple"></span>图片节点</button>
           <button data-action="add-image-compare"><span class="node-menu-icon blue"></span>图片对比</button>
           <button data-action="add-image-expand"><span class="node-menu-icon green"></span>图片扩展</button>
+          <button data-action="add-image-upscale"><span class="node-menu-icon blue"></span>图像放大</button>
           <button data-action="add-model3d"><span class="node-menu-icon purple"></span>3D 模型预览</button>
           <button data-action="add-uploaded-image"><span class="node-menu-icon blue"></span>载入图像</button>
           <button data-action="add-uploaded-video"><span class="node-menu-icon orange"></span>载入视频</button>
@@ -175,6 +180,8 @@
     <script src="./theme-styles.js"></script>
     <script src="./video-polling.js"></script>
     <script src="./video-replica.js"></script>
+    <script src="./canvas-cases.js"></script>
+    <script src="./canvas-cases-ui.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

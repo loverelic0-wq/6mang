@@ -35,6 +35,7 @@
         { action: "add-layer-separation", label: "智能图层分离" },
         { action: "add-image-compare", label: "图片对比" },
         { action: "add-image-expand", label: "图片扩展" },
+        { action: "add-image-upscale", label: "图像放大" },
       ],
     },
     {

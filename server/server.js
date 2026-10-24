@@ -12,14 +12,26 @@ const { isCprtProvider, buildCprtCreatePayload, normalizeCprtTask } = require(".
 const { imageReferences, isGptImage2Model, selectImageUpstreamRequest } = require("./image-routing");
 const gptImageModels = require("../public/gpt-image-models");
 const { requestText } = require("./upstream-http");
+const { createComfyUiManager } = require("./comfyui-manager");
 
 const kling = createKlingCli({ rootDir, errorLogPath: path.join(rootDir, "data", "kling-error.log") });
+const comfyUi = createComfyUiManager({ rootDir, logRoot: path.join(rootDir, "data", "comfyui") });
 
 const publicDir = path.join(rootDir, "public");
 const runtimeSettingsPath = path.join(rootDir, ".huobao-settings.json");
 const port = Number(process.env.PORT || 8787);
 const host = process.env.HOST || "127.0.0.1";
 const adminToken = process.env.ADMIN_TOKEN || "";
+// 6mang is a local single-user canvas by default. Set HUOBAO_LOCAL_MODE=false
+// only for legacy deployments that still need the old account and credit flow.
+const localMode = String(process.env.HUOBAO_LOCAL_MODE || "true").toLowerCase() !== "false";
+const localUser = {
+  id: 0,
+  username: "local",
+  balance: Number.MAX_SAFE_INTEGER,
+  is_admin: 1,
+  created_at: "",
+};
 const GPT_IMAGE_2_TIMEOUT_MS = 15 * 60 * 1000;
 
 const modelCostRules = {
@@ -44,10 +56,70 @@ const modelCostRules = {
   },
 };
 
+const UPSCALE_TIMEOUT_MS = 15 * 60 * 1000;
+const UPSCALE_ADAPTERS = new Set(["http", "comfyui"]);
+
+function normalizeCapabilityList(value) {
+  return Array.isArray(value)
+    ? [...new Set(value.map((item) => String(item || "").trim().toLowerCase()).filter(Boolean))]
+    : [];
+}
+
+function normalizeUpscaleModel(model) {
+  if (!model || typeof model !== "object" || !model.id) return null;
+  const capabilities = normalizeCapabilityList(model.capabilities);
+  const maxScale = Number(model.maxScale);
+  const maxEdge = Number(model.maxEdge);
+  const maxPixels = Number(model.maxPixels);
+  return {
+    id: String(model.id),
+    label: String(model.label || model.id),
+    ...(capabilities.length ? { capabilities } : {}),
+    ...(Number.isFinite(maxScale) && maxScale > 0 ? { maxScale } : {}),
+    ...(Number.isFinite(maxEdge) && maxEdge > 0 ? { maxEdge } : {}),
+    ...(Number.isFinite(maxPixels) && maxPixels > 0 ? { maxPixels } : {}),
+  };
+}
+
+function modelForProvider(provider, modelId) {
+  return (Array.isArray(provider?.models) ? provider.models : [])
+    .find((model) => String(model?.id || "") === String(modelId || "")) || null;
+}
+
+function providerSupportsUpscale(provider, modelId) {
+  const model = modelForProvider(provider, modelId);
+  if (!model) return false;
+  const providerCapabilities = normalizeCapabilityList(provider?.capabilities);
+  const modelCapabilities = normalizeCapabilityList(model?.capabilities);
+  return modelCapabilities.includes("upscale") || providerCapabilities.includes("upscale");
+}
+
+function upscaleModelLimits(provider, modelId) {
+  const model = modelForProvider(provider, modelId) || {};
+  const maxScale = Number(model.maxScale || provider?.maxScale || 4);
+  const maxEdge = Number(model.maxEdge || provider?.maxEdge || 0);
+  const maxPixels = Number(model.maxPixels || provider?.maxPixels || 0);
+  return {
+    maxScale: Number.isFinite(maxScale) && maxScale > 0 ? maxScale : 4,
+    maxEdge: Number.isFinite(maxEdge) && maxEdge > 0 ? maxEdge : 0,
+    maxPixels: Number.isFinite(maxPixels) && maxPixels > 0 ? maxPixels : 0,
+  };
+}
+
 function costFor(serviceName, model) {
   const table = modelCostRules[serviceName] || { default: 1 };
   if (model && table[model]) return table[model];
   return table.default;
+}
+
+function adjustBalance(entry) {
+  if (localMode) return 0;
+  return db.adjustBalance(entry);
+}
+
+function recordApiUsage(entry) {
+  if (localMode) return;
+  return db.recordApiUsage(entry);
 }
 
 const PROMPT_OPTIMIZER_SYSTEM = `你是顶级的中文 AI 绘画提示词专家，专为即梦 AI 等中文文生图/文生视频模型服务。
@@ -178,7 +250,7 @@ function parseOptimizedPrompt(raw) {
   return { ...empty, subject: text };
 }
 
-if (!db.userCount()) {
+if (!localMode && !db.userCount()) {
   const adminPassword = process.env.ADMIN_PASSWORD || "admin1234";
   const admin = db.createUser({ username: "admin", password: adminPassword, isAdmin: true, initialBalance: 100000 });
   console.log(`[bootstrap] created default admin (username=admin, password=${adminPassword}) balance=${admin.balance}`);
@@ -220,6 +292,22 @@ const DEFAULT_PROVIDERS = {
         defaultModel: "doubao-seedream-5-0-pro-260628",
         models: [
           { id: "doubao-seedream-5-0-pro-260628", label: "豆包 Seedream 5.0 Pro（火山引擎）" },
+        ],
+      },
+      "comfyui-local": {
+        label: "本地 ComfyUI（需安装）",
+        adapter: "comfyui",
+        baseUrl: "http://127.0.0.1:8190",
+        apiKey: "",
+        defaultModel: "RealESRGAN_x4plus.pth",
+        autoStart: false,
+        keepAlive: true,
+        installDir: "",
+        pythonPath: "",
+        port: 8190,
+        workflowPath: "workflows/comfyui/realesrgan-upscale-api.json",
+        models: [
+          { id: "RealESRGAN_x4plus.pth", label: "RealESRGAN x4plus（本地超分）", capabilities: ["upscale"], maxScale: 4, maxEdge: 4096 },
         ],
       },
     },
@@ -301,6 +389,15 @@ function ensureManagedProviders(providers) {
     providers[kind].items["kling-cli"] = managedKlingProvider();
     if (!providers[kind].default) providers[kind].default = "kling-cli";
   }
+  ensureLocalComfyUiProvider(providers);
+  return providers;
+}
+
+function ensureLocalComfyUiProvider(providers) {
+  const group = providers?.image;
+  if (!group || !group.items) return providers;
+  const hasComfy = Object.values(group.items).some((item) => item?.adapter === "comfyui");
+  if (!hasComfy) group.items["comfyui-local"] = JSON.parse(JSON.stringify(DEFAULT_PROVIDERS.image.items["comfyui-local"]));
   return providers;
 }
 
@@ -394,18 +491,43 @@ function normalizeProviders(input) {
 }
 
 function normalizeProviderItem(pdef) {
+  const adapter = UPSCALE_ADAPTERS.has(String(pdef.adapter || "").toLowerCase())
+    ? String(pdef.adapter).toLowerCase()
+    : (pdef.adapter === "kling-cli" ? "kling-cli" : "http");
+  const capabilities = normalizeCapabilityList(pdef.capabilities);
+  const models = Array.isArray(pdef.models)
+    ? pdef.models.map(normalizeUpscaleModel).filter(Boolean)
+    : [];
+  const maxScale = Number(pdef.maxScale);
+  const maxEdge = Number(pdef.maxEdge);
+  const maxPixels = Number(pdef.maxPixels);
+  const comfyPort = Number(pdef.port);
+  const readyTimeoutMs = Number(pdef.readyTimeoutMs);
+  const readyPollMs = Number(pdef.readyPollMs);
   const item = {
     label: String(pdef.label || ""),
-    adapter: pdef.adapter === "kling-cli" ? "kling-cli" : "http",
+    adapter,
     managed: Boolean(pdef.managed || pdef.adapter === "kling-cli"),
     baseUrl: String(pdef.baseUrl || ""),
     apiKey: String(pdef.apiKey || ""),
     defaultModel: String(pdef.defaultModel || ""),
-    models: Array.isArray(pdef.models)
-      ? pdef.models
-          .filter((m) => m && typeof m === "object" && m.id)
-          .map((m) => ({ id: String(m.id), label: String(m.label || m.id) }))
-      : [],
+    models,
+    ...(capabilities.length ? { capabilities } : {}),
+    ...(Number.isFinite(maxScale) && maxScale > 0 ? { maxScale } : {}),
+    ...(Number.isFinite(maxEdge) && maxEdge > 0 ? { maxEdge } : {}),
+    ...(Number.isFinite(maxPixels) && maxPixels > 0 ? { maxPixels } : {}),
+    ...(pdef.upscalePath ? { upscalePath: String(pdef.upscalePath) } : {}),
+    ...(pdef.upscaleProtocol ? { upscaleProtocol: String(pdef.upscaleProtocol) } : {}),
+    ...(pdef.workflowPath ? { workflowPath: String(pdef.workflowPath) } : {}),
+    ...(pdef.workflow && typeof pdef.workflow === "object" ? { workflow: pdef.workflow } : {}),
+    ...(pdef.autoStart !== undefined ? { autoStart: Boolean(pdef.autoStart) } : {}),
+    ...(pdef.keepAlive !== undefined ? { keepAlive: Boolean(pdef.keepAlive) } : {}),
+    ...(pdef.installDir ? { installDir: String(pdef.installDir) } : {}),
+    ...(pdef.pythonPath ? { pythonPath: String(pdef.pythonPath) } : {}),
+    ...(Number.isFinite(comfyPort) && comfyPort > 0 ? { port: comfyPort } : {}),
+    ...(Number.isFinite(readyTimeoutMs) && readyTimeoutMs > 0 ? { readyTimeoutMs } : {}),
+    ...(Number.isFinite(readyPollMs) && readyPollMs > 0 ? { readyPollMs } : {}),
+    ...(Array.isArray(pdef.launchArgs) ? { launchArgs: pdef.launchArgs.map(String) } : {}),
   };
   return gptImageModels.migrateNanoBananaProvider(item);
 }
@@ -433,6 +555,11 @@ function resolveProviderApiKey(kind, id, item) {
     return runtimeSettings.providers?.video?.items?.volc?.apiKey || "";
   }
   return "";
+}
+
+function providerConfigured(kind, id, item) {
+  if (item?.adapter === "comfyui") return Boolean(item.baseUrl);
+  return Boolean(resolveProviderApiKey(kind, id, item));
 }
 
 async function publicProvidersStatus() {
@@ -469,7 +596,23 @@ async function publicProvidersStatus() {
         baseUrl: item.baseUrl,
         defaultModel: item.defaultModel,
         models: item.models,
-        configured: Boolean(resolveProviderApiKey(kind, id, item)),
+        ...(item.capabilities ? { capabilities: item.capabilities } : {}),
+        ...(item.maxScale ? { maxScale: item.maxScale } : {}),
+        ...(item.maxEdge ? { maxEdge: item.maxEdge } : {}),
+        ...(item.maxPixels ? { maxPixels: item.maxPixels } : {}),
+        ...(item.upscalePath ? { upscalePath: item.upscalePath } : {}),
+        ...(item.upscaleProtocol ? { upscaleProtocol: item.upscaleProtocol } : {}),
+        ...(item.workflowPath ? { workflowPath: item.workflowPath } : {}),
+        ...(item.workflow ? { workflow: item.workflow } : {}),
+        ...(item.autoStart !== undefined ? { autoStart: item.autoStart } : {}),
+        ...(item.keepAlive !== undefined ? { keepAlive: item.keepAlive } : {}),
+        ...(item.installDir ? { installDir: item.installDir } : {}),
+        ...(item.pythonPath ? { pythonPath: item.pythonPath } : {}),
+        ...(item.port ? { port: item.port } : {}),
+        ...(item.readyTimeoutMs ? { readyTimeoutMs: item.readyTimeoutMs } : {}),
+        ...(item.readyPollMs ? { readyPollMs: item.readyPollMs } : {}),
+        ...(Array.isArray(item.launchArgs) ? { launchArgs: item.launchArgs } : {}),
+        configured: providerConfigured(kind, id, item),
         apiKeyMasked: maskApiKey(resolveProviderApiKey(kind, id, item)),
       };
     }
@@ -584,6 +727,7 @@ function getRequestUser(req) {
 }
 
 function requireUser(req) {
+  if (localMode) return { user: localUser };
   const found = getRequestUser(req);
   if (!found) {
     const error = new Error("未登录");
@@ -594,6 +738,7 @@ function requireUser(req) {
 }
 
 function requireAdmin(req) {
+  if (localMode) return true;
   const found = getRequestUser(req);
   if (found?.user?.is_admin) return true;
   const supplied = (req.headers["x-admin-token"] || "").toString();
@@ -609,6 +754,10 @@ function requireAdminOrThrow(req) {
 }
 
 async function handleApi(req, res, url) {
+  if (localMode && (url.pathname.startsWith("/api/auth/") || url.pathname.startsWith("/api/billing/") || url.pathname.startsWith("/api/admin/"))) {
+    sendJson(res, 404, { error: "本地模式未启用账户与积分" });
+    return;
+  }
   if (url.pathname === "/api/director/export" && req.method === "POST") {
     const found = requireUser(req);
     // 本地预演编码，不调用生成模型，不扣生成积分。
@@ -714,7 +863,7 @@ async function handleApi(req, res, url) {
       return;
     }
     try {
-      const next = db.adjustBalance({
+      const next = adjustBalance({
         userId: target.id,
         delta: amount,
         type: amount > 0 ? "admin_credit" : "admin_debit",
@@ -778,6 +927,24 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/comfyui/status" && req.method === "GET") {
+    const provider = getProvider("image", url.searchParams.get("providerId") || "comfyui-local");
+    if (provider.adapter !== "comfyui") throw upscaleError("当前 Provider 不是 ComfyUI", 400);
+    sendJson(res, 200, await comfyUi.status(provider));
+    return;
+  }
+
+  if (url.pathname === "/api/comfyui/test" && req.method === "POST") {
+    requireUser(req);
+    const body = await readJson(req);
+    const provider = getProvider("image", body.providerId || "comfyui-local");
+    if (provider.adapter !== "comfyui") throw upscaleError("当前 Provider 不是 ComfyUI", 400);
+    loadComfyWorkflow(provider);
+    const ready = await comfyUi.ensureReady(provider);
+    sendJson(res, 200, { ok: true, ...ready });
+    return;
+  }
+
   if (url.pathname === "/api/settings" && req.method === "POST") {
     if (!requireAdmin(req)) {
       sendJson(res, 403, { error: "需要管理员权限" });
@@ -786,6 +953,61 @@ async function handleApi(req, res, url) {
     const body = await readJson(req);
     applyProvidersUpdate(body.providers);
     sendJson(res, 200, { providers: await publicProvidersStatus() });
+    return;
+  }
+
+  if (url.pathname === "/api/images/upscale" && req.method === "POST") {
+    const found = requireUser(req);
+    const body = await readJson(req);
+    const provider = getProvider("image", body.providerId);
+    if (!UPSCALE_ADAPTERS.has(provider.adapter)) {
+      throw upscaleError(`当前 Provider 不支持超分适配器：${provider.adapter || "未知"}`, 400);
+    }
+    const model = String(body.model || provider.defaultModel || "");
+    if (!model) throw upscaleError("未选择超分模型", 400);
+    if (!providerSupportsUpscale(provider, model)) {
+      throw upscaleError("当前图片 Provider/模型未声明支持超分辨率", 400);
+    }
+    const scale = Number(body.scale);
+    const limits = upscaleModelLimits(provider, model);
+    if (![2, 4].includes(scale)) throw upscaleError("放大倍数只支持 2x 或 4x", 400);
+    if (scale > limits.maxScale) throw upscaleError(`当前模型最多支持 ${limits.maxScale}x 放大`, 400);
+    const targetWidth = Math.round(Number(body.targetWidth));
+    const targetHeight = Math.round(Number(body.targetHeight));
+    if (!(targetWidth > 0) || !(targetHeight > 0)) throw upscaleError("目标尺寸无效", 400);
+    if (limits.maxEdge && Math.max(targetWidth, targetHeight) > limits.maxEdge) {
+      throw upscaleError(`目标长边超过模型上限 ${limits.maxEdge}px`, 400);
+    }
+    if (limits.maxPixels && targetWidth * targetHeight > limits.maxPixels) {
+      throw upscaleError(`目标像素超过模型上限 ${limits.maxPixels}px`, 400);
+    }
+    const source = Array.isArray(body.image) ? body.image[0] : body.image;
+    if (typeof source !== "string" || !source) throw upscaleError("请提供一张输入图片", 400);
+    const outputFormat = String(body.outputFormat || "png").toLowerCase();
+    if (!["png", "jpeg", "webp"].includes(outputFormat)) throw upscaleError("输出格式无效", 400);
+
+    const requestBody = {
+      providerId: provider.id,
+      model,
+      image: source,
+      scale,
+      targetWidth,
+      targetHeight,
+      outputFormat,
+    };
+    const cost = provider.adapter === "comfyui" ? 0 : costFor("image", model);
+    if (cost) adjustBalance({ userId: found.user.id, delta: -cost, type: "spend", description: `upscale ${model}` });
+    try {
+      const data = await requestImageUpscale(provider, requestBody);
+      recordApiUsage({ userId: found.user.id, route: "images/upscale", model, cost, status: "ok" });
+      sendJson(res, 200, data);
+    } catch (error) {
+      if (cost) adjustBalance({ userId: found.user.id, delta: cost, type: "refund", description: `refund upscale ${model}: ${error.message}` });
+      recordApiUsage({ userId: found.user.id, route: "images/upscale", model, cost: 0, status: `error: ${error.message}` });
+      throw error;
+    } finally {
+      if (provider.adapter === "comfyui" && provider.keepAlive === false) comfyUi.stop?.(provider);
+    }
     return;
   }
 
@@ -800,7 +1022,7 @@ async function handleApi(req, res, url) {
     const provider = getProvider("chat", body.providerId);
     const model = body.model || provider.defaultModel;
     const cost = costFor("chat", model);
-    db.adjustBalance({ userId: found.user.id, delta: -cost, type: "spend", description: `chat ${model}` });
+    adjustBalance({ userId: found.user.id, delta: -cost, type: "spend", description: `chat ${model}` });
     try {
       const data = await n1nFetch(provider, "/chat/completions", {
         method: "POST",
@@ -816,11 +1038,11 @@ async function handleApi(req, res, url) {
           max_tokens: 2000,
         },
       });
-      db.recordApiUsage({ userId: found.user.id, route: "chat/polish", model, cost, status: "ok" });
+      recordApiUsage({ userId: found.user.id, route: "chat/polish", model, cost, status: "ok" });
       sendJson(res, 200, { text: data?.choices?.[0]?.message?.content?.trim() || body.text || "" });
     } catch (error) {
-      db.adjustBalance({ userId: found.user.id, delta: cost, type: "refund", description: `refund chat ${model}: ${error.message}` });
-      db.recordApiUsage({ userId: found.user.id, route: "chat/polish", model, cost: 0, status: `error: ${error.message}` });
+      adjustBalance({ userId: found.user.id, delta: cost, type: "refund", description: `refund chat ${model}: ${error.message}` });
+      recordApiUsage({ userId: found.user.id, route: "chat/polish", model, cost: 0, status: `error: ${error.message}` });
       throw error;
     }
     return;
@@ -832,7 +1054,7 @@ async function handleApi(req, res, url) {
     const provider = getProvider("chat", body.providerId);
     const model = body.model || provider.defaultModel;
     const cost = costFor("chat", model);
-    db.adjustBalance({ userId: found.user.id, delta: -cost, type: "spend", description: `storyboard-assistant ${model}` });
+    adjustBalance({ userId: found.user.id, delta: -cost, type: "spend", description: `storyboard-assistant ${model}` });
     try {
       const userText = [
         body.text ? `用户故事/场景（必须围绕以下内容设计，不得替换成无关场景）：\n${body.text}` : "",
@@ -849,11 +1071,11 @@ async function handleApi(req, res, url) {
           max_tokens: 4000,
         },
       });
-      db.recordApiUsage({ userId: found.user.id, route: "chat/storyboard-assistant", model, cost, status: "ok" });
+      recordApiUsage({ userId: found.user.id, route: "chat/storyboard-assistant", model, cost, status: "ok" });
       sendJson(res, 200, { text: data?.choices?.[0]?.message?.content?.trim() || "" });
     } catch (error) {
-      db.adjustBalance({ userId: found.user.id, delta: cost, type: "refund", description: `refund storyboard-assistant ${model}: ${error.message}` });
-      db.recordApiUsage({ userId: found.user.id, route: "chat/storyboard-assistant", model, cost: 0, status: `error: ${error.message}` });
+      adjustBalance({ userId: found.user.id, delta: cost, type: "refund", description: `refund storyboard-assistant ${model}: ${error.message}` });
+      recordApiUsage({ userId: found.user.id, route: "chat/storyboard-assistant", model, cost: 0, status: `error: ${error.message}` });
       throw error;
     }
     return;
@@ -865,7 +1087,7 @@ async function handleApi(req, res, url) {
     const provider = getProvider("chat", body.providerId);
     const model = body.model || provider.defaultModel;
     const cost = costFor("chat", model);
-    db.adjustBalance({ userId: found.user.id, delta: -cost, type: "spend", description: `prompt-optimize ${model}` });
+    adjustBalance({ userId: found.user.id, delta: -cost, type: "spend", description: `prompt-optimize ${model}` });
     try {
       const data = await n1nFetch(provider, "/chat/completions", {
         method: "POST",
@@ -880,11 +1102,11 @@ async function handleApi(req, res, url) {
       });
       const raw = data?.choices?.[0]?.message?.content?.trim() || "";
       const parsed = parseOptimizedPrompt(raw);
-      db.recordApiUsage({ userId: found.user.id, route: "chat/optimize-prompt", model, cost, status: "ok" });
+      recordApiUsage({ userId: found.user.id, route: "chat/optimize-prompt", model, cost, status: "ok" });
       sendJson(res, 200, { ...parsed, raw });
     } catch (error) {
-      db.adjustBalance({ userId: found.user.id, delta: cost, type: "refund", description: `refund prompt-optimize ${model}: ${error.message}` });
-      db.recordApiUsage({ userId: found.user.id, route: "chat/optimize-prompt", model, cost: 0, status: `error: ${error.message}` });
+      adjustBalance({ userId: found.user.id, delta: cost, type: "refund", description: `refund prompt-optimize ${model}: ${error.message}` });
+      recordApiUsage({ userId: found.user.id, route: "chat/optimize-prompt", model, cost: 0, status: `error: ${error.message}` });
       throw error;
     }
     return;
@@ -911,7 +1133,7 @@ async function handleApi(req, res, url) {
     }
     const upstreamRequest = isChatImageModel(model) ? null : selectImageUpstreamRequest(provider, body);
     const cost = costFor("image", model);
-    db.adjustBalance({ userId: found.user.id, delta: -cost, type: "spend", description: `image ${model}` });
+    adjustBalance({ userId: found.user.id, delta: -cost, type: "spend", description: `image ${model}` });
     try {
       let data;
       if (isChatImageModel(model)) {
@@ -952,11 +1174,11 @@ async function handleApi(req, res, url) {
           timeoutMs: isGptImage2Model(model) ? GPT_IMAGE_2_TIMEOUT_MS : 0,
         });
       }
-      db.recordApiUsage({ userId: found.user.id, route: "images/generations", model, cost, status: "ok" });
+      recordApiUsage({ userId: found.user.id, route: "images/generations", model, cost, status: "ok" });
       sendJson(res, 200, data);
     } catch (error) {
-      db.adjustBalance({ userId: found.user.id, delta: cost, type: "refund", description: `refund image ${model}: ${error.message}` });
-      db.recordApiUsage({ userId: found.user.id, route: "images/generations", model, cost: 0, status: `error: ${error.message}` });
+      adjustBalance({ userId: found.user.id, delta: cost, type: "refund", description: `refund image ${model}: ${error.message}` });
+      recordApiUsage({ userId: found.user.id, route: "images/generations", model, cost: 0, status: `error: ${error.message}` });
       throw error;
     }
     return;
@@ -968,7 +1190,7 @@ async function handleApi(req, res, url) {
     const provider = getProvider("image", body.providerId);
     const model = String(body.model || "midjourney");
     const cost = costFor("image", model);
-    db.adjustBalance({ userId: found.user.id, delta: -cost, type: "spend", description: `mj ${model}` });
+    adjustBalance({ userId: found.user.id, delta: -cost, type: "spend", description: `mj ${model}` });
     try {
       const base64Array = await Promise.all(
         (Array.isArray(body.images) ? body.images.filter(Boolean) : []).map(imageSourceToBase64),
@@ -990,11 +1212,11 @@ async function handleApi(req, res, url) {
         error.statusCode = code === 24 ? 402 : 502;
         throw error;
       }
-      db.recordApiUsage({ userId: found.user.id, route: "images/mj/create", model, cost, status: "ok" });
+      recordApiUsage({ userId: found.user.id, route: "images/mj/create", model, cost, status: "ok" });
       sendJson(res, 200, { id: String(data.result), code, description: data.description || "" });
     } catch (error) {
-      db.adjustBalance({ userId: found.user.id, delta: cost, type: "refund", description: `refund mj ${model}: ${error.message}` });
-      db.recordApiUsage({ userId: found.user.id, route: "images/mj/create", model, cost: 0, status: `error: ${error.message}` });
+      adjustBalance({ userId: found.user.id, delta: cost, type: "refund", description: `refund mj ${model}: ${error.message}` });
+      recordApiUsage({ userId: found.user.id, route: "images/mj/create", model, cost: 0, status: `error: ${error.message}` });
       throw error;
     }
     return;
@@ -1066,7 +1288,7 @@ async function handleApi(req, res, url) {
       return;
     }
     const cost = costFor("video", model);
-    db.adjustBalance({ userId: found.user.id, delta: -cost, type: "spend", description: `video ${model}` });
+    adjustBalance({ userId: found.user.id, delta: -cost, type: "spend", description: `video ${model}` });
     try {
       // Ark 与 CPRT 都只接受公网素材；本地 data URL 先传 COS 换公网外链。
       if ((isVolcArkProvider(provider) || isCprtProvider(provider)) && Array.isArray(body.videos) && body.videos.length) {
@@ -1094,7 +1316,7 @@ async function handleApi(req, res, url) {
             body: buildVideoCreatePayload(model, body),
           });
       }
-      db.recordApiUsage({ userId: found.user.id, route: "video/create", model, cost, status: "ok" });
+      recordApiUsage({ userId: found.user.id, route: "video/create", model, cost, status: "ok" });
       sendJson(res, 200, data);
     } catch (error) {
       const vids = Array.isArray(body.videos) ? body.videos : [];
@@ -1113,8 +1335,8 @@ async function handleApi(req, res, url) {
       };
       console.error("[video/create] 失败:", diag);
       try { fs.appendFileSync(path.join(rootDir, "data", "video-error.log"), JSON.stringify(diag) + "\n"); } catch {}
-      db.adjustBalance({ userId: found.user.id, delta: cost, type: "refund", description: `refund video ${model}: ${error.message}` });
-      db.recordApiUsage({ userId: found.user.id, route: "video/create", model, cost: 0, status: `error: ${error.message}` });
+      adjustBalance({ userId: found.user.id, delta: cost, type: "refund", description: `refund video ${model}: ${error.message}` });
+      recordApiUsage({ userId: found.user.id, route: "video/create", model, cost: 0, status: `error: ${error.message}` });
       throw error;
     }
     return;
@@ -1726,6 +1948,198 @@ async function chatImageGenerate(provider, model, refImages, body) {
   }
   // 包装成与 /images/generations 一致的结构，前端 extractImageSource 即可识别
   return { data: [{ url }] };
+}
+
+function upscaleError(message, statusCode = 400) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+function upscaleRoute(provider) {
+  const configured = String(provider?.upscalePath || "/images/upscale").trim();
+  if (!configured) return "/images/upscale";
+  return configured.startsWith("/") ? configured : `/${configured}`;
+}
+
+function replaceWorkflowTokens(value, replacements) {
+  if (typeof value === "string") {
+    return value.replace(/__([A-Z0-9_]+)__/g, (full, key) => (
+      Object.prototype.hasOwnProperty.call(replacements, key) ? String(replacements[key]) : full
+    ));
+  }
+  if (Array.isArray(value)) return value.map((item) => replaceWorkflowTokens(item, replacements));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, replaceWorkflowTokens(item, replacements)]));
+  }
+  return value;
+}
+
+function loadComfyWorkflow(provider) {
+  if (provider?.workflow && typeof provider.workflow === "object") return validateComfyApiWorkflow(JSON.parse(JSON.stringify(provider.workflow)));
+  const workflowPath = String(provider?.workflowPath || "").trim();
+  if (!workflowPath) {
+    throw upscaleError("ComfyUI Provider 未配置 workflow 或 workflowPath");
+  }
+  const resolved = path.isAbsolute(workflowPath) ? path.resolve(workflowPath) : path.resolve(rootDir, workflowPath);
+  try {
+    return validateComfyApiWorkflow(JSON.parse(fs.readFileSync(resolved, "utf8")));
+  } catch (error) {
+    if (error.statusCode) throw error;
+    throw upscaleError(`读取 ComfyUI workflow 失败：${error.message}`);
+  }
+}
+
+function validateComfyApiWorkflow(workflow) {
+  if (!workflow || typeof workflow !== "object" || Array.isArray(workflow) || !Object.keys(workflow).length) {
+    throw upscaleError("ComfyUI workflow 为空或格式无效");
+  }
+  if (workflow.nodes !== undefined || workflow.definitions !== undefined || workflow.version === 0.4) {
+    throw upscaleError("当前文件是 ComfyUI 画布格式，请使用 Save API Format 重新导出");
+  }
+  const entries = Object.entries(workflow);
+  if (!entries.some(([, node]) => node && typeof node === "object" && node.class_type && node.inputs && typeof node.inputs === "object")) {
+    throw upscaleError("ComfyUI workflow 必须是 Save API Format 导出的节点映射");
+  }
+  return workflow;
+}
+
+function comfyBaseUrl(provider) {
+  const base = String(provider?.baseUrl || "").replace(/\/$/, "");
+  if (!base) throw upscaleError("ComfyUI Provider 未配置 Base URL", 500);
+  return base;
+}
+
+function comfyErrorDetail(value) {
+  if (typeof value === "string") return value.trim().slice(0, 1000);
+  if (!value || typeof value !== "object") return "";
+  return comfyErrorDetail(value.exception_message || value.message || value.details || value.type);
+}
+
+function comfyExecutionError(record) {
+  const messages = Array.isArray(record?.status?.messages) ? record.status.messages : [];
+  const failure = messages.find((message) => ["execution_error", "execution_interrupted"].includes(message?.[0]));
+  if (!failure && record?.status?.status_str !== "error") return "";
+  const detail = comfyErrorDetail(failure?.[1]);
+  if (/cannot identify image file|UnidentifiedImageError/i.test(detail)) {
+    return "ComfyUI 无法解码输入图片，请重新载入有效的 PNG、JPEG 或 WebP 图片";
+  }
+  return `ComfyUI 放大工作流失败${detail ? `：${detail}` : failure?.[0] === "execution_interrupted" ? "：任务被中断，请重试" : ""}`;
+}
+
+async function comfyFetch(provider, route, options = {}) {
+  const { binary = false, ...fetchOptions } = options;
+  const headers = { Accept: "application/json", ...(options.headers || {}) };
+  if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
+  const response = await fetch(`${comfyBaseUrl(provider)}${route}`, { ...fetchOptions, headers });
+  const text = binary ? "" : await response.text();
+  if (!response.ok) {
+    let payload = null;
+    try { payload = text ? JSON.parse(text) : null; } catch {}
+    const nodeErrors = Object.values(payload?.node_errors || {}).flatMap((node) => node?.errors || []);
+    const detail = [comfyErrorDetail(payload?.error || payload?.message), ...nodeErrors.map(comfyErrorDetail)].filter(Boolean).join("；");
+    throw upscaleError(detail || text || `ComfyUI HTTP ${response.status}`, response.status);
+  }
+  return { response, text };
+}
+
+async function requestComfyUiUpscale(provider, body, imageBlob) {
+  const workflowTemplate = loadComfyWorkflow(provider);
+  await comfyUi.ensureReady(provider);
+  const form = new FormData();
+  // Keep concurrent jobs and existing user uploads independent.
+  const uploadName = `6mang-upscale-${crypto.randomBytes(12).toString("hex")}.${mimeToExt(imageBlob.type)}`;
+  form.append("image", imageBlob, uploadName);
+  form.append("overwrite", "false");
+  const upload = await comfyFetch(provider, "/upload/image", { method: "POST", body: form });
+  let uploadData;
+  try { uploadData = upload.text ? JSON.parse(upload.text) : {}; } catch { uploadData = {}; }
+  const filename = uploadData.name || uploadName;
+  const subfolder = uploadData.subfolder || "";
+  const type = uploadData.type || "input";
+
+  const workflow = replaceWorkflowTokens(workflowTemplate, {
+    IMAGE_FILENAME: filename,
+    IMAGE_SUBFOLDER: subfolder,
+    IMAGE_TYPE: type,
+    SCALE: body.scale,
+    TARGET_WIDTH: body.targetWidth,
+    TARGET_HEIGHT: body.targetHeight,
+    OUTPUT_FORMAT: body.outputFormat,
+    MODEL: body.model,
+  });
+  const submitted = await comfyFetch(provider, "/prompt", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt: workflow, client_id: `6mang-upscale-${crypto.randomBytes(8).toString("hex")}` }),
+  });
+  let promptData;
+  try { promptData = submitted.text ? JSON.parse(submitted.text) : {}; } catch { promptData = {}; }
+  const promptId = String(promptData.prompt_id || promptData.id || "");
+  if (!promptId) throw upscaleError(promptData.error || "ComfyUI 未返回 prompt_id", 502);
+
+  const deadline = Date.now() + UPSCALE_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const history = await comfyFetch(provider, `/history/${encodeURIComponent(promptId)}`, { method: "GET" });
+    let historyData;
+    try { historyData = history.text ? JSON.parse(history.text) : {}; } catch { historyData = {}; }
+    const record = historyData?.[promptId] || historyData;
+    const failure = comfyExecutionError(record);
+    if (failure) throw upscaleError(failure, 502);
+    const outputs = record?.outputs || {};
+    const images = Object.values(outputs).flatMap((entry) => Array.isArray(entry?.images) ? entry.images : []);
+    const output = images.find((item) => item?.filename) || null;
+    if (output) {
+      const query = new URLSearchParams({
+        filename: String(output.filename),
+        subfolder: String(output.subfolder || ""),
+        type: String(output.type || "output"),
+      });
+      const rendered = await comfyFetch(provider, `/view?${query.toString()}`, { method: "GET", binary: true });
+      const buffer = Buffer.from(await rendered.response.arrayBuffer());
+      const mime = rendered.response.headers.get("content-type") || "image/png";
+      return { data: [{ b64_json: buffer.toString("base64"), mime }] };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 750));
+  }
+  throw upscaleError("ComfyUI 放大任务超时", 504);
+}
+
+async function requestHttpUpscale(provider, body, imageBlob) {
+  const protocol = String(provider?.upscaleProtocol || "multipart").toLowerCase();
+  const route = upscaleRoute(provider);
+  if (protocol === "json") {
+    const source = Buffer.from(await imageBlob.arrayBuffer()).toString("base64");
+    return n1nFetch(provider, route, {
+      method: "POST",
+      timeoutMs: UPSCALE_TIMEOUT_MS,
+      body: {
+        model: body.model,
+        image: `data:${imageBlob.type || "image/png"};base64,${source}`,
+        scale: body.scale,
+        target_width: body.targetWidth,
+        target_height: body.targetHeight,
+        output_format: body.outputFormat,
+      },
+    });
+  }
+  const form = new FormData();
+  form.append("model", body.model);
+  form.append("scale", String(body.scale));
+  form.append("target_width", String(body.targetWidth));
+  form.append("target_height", String(body.targetHeight));
+  form.append("output_format", body.outputFormat);
+  form.append("image", imageBlob, imageBlob.filename || "input.png");
+  return n1nFetchForm(provider, route, form, { timeoutMs: UPSCALE_TIMEOUT_MS });
+}
+
+async function requestImageUpscale(provider, body) {
+  const source = Array.isArray(body.image) ? body.image[0] : body.image;
+  const imageBlob = await imageSourceToBlob(source);
+  if (!imageBlob) throw upscaleError("输入图片解析失败", 400);
+  if (provider.adapter === "comfyui") return requestComfyUiUpscale(provider, body, imageBlob);
+  if (provider.adapter === "http") return requestHttpUpscale(provider, body, imageBlob);
+  throw upscaleError(`不支持的超分 Provider 适配器：${provider.adapter || "未知"}`, 400);
 }
 
 function wrapUpstreamNetworkError(provider, error, timeoutMs) {

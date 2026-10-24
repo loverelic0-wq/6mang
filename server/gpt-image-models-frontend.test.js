@@ -27,6 +27,7 @@ function harness(provider, config) {
     ["const seedreamImageSizes =", "// 3D 取景比例选项"],
     ["function imageSizeForAspect(", "function ratioNumOf("],
     ["function buildImageGenerationBody(", "function extractImageSource("],
+    ["function fitUpscaleDimensions(", "function upscaleTargetSize("],
     ["function fitExpandDimensions(", "function expandTargetSize("],
     ["function syncNodeFieldControl(", "function normalizeNodeModelValue("],
   ]) {
@@ -62,6 +63,25 @@ test("old 147 canvas nodes adopt the replacement before provider lookup", () => 
   }
 });
 
+test("upscale dimensions preserve ratio and apply scale, edge, pixel, and model limits", () => {
+  const app = harness(provider());
+  const exact = app.fitUpscaleDimensions(1001, 667, 2, { maxEdge: 4096, maxPixels: 0 });
+  assert.deepEqual(JSON.parse(JSON.stringify(exact)), {
+    valid: true, width: 2002, height: 1334, limited: false, error: "",
+  });
+  const edgeLimited = app.fitUpscaleDimensions(1200, 800, 4, { maxScale: 4, maxEdge: 4096, maxPixels: 0 });
+  assert.deepEqual([edgeLimited.valid, edgeLimited.width, edgeLimited.height, edgeLimited.limited], [true, 4096, 2731, true]);
+  const pixelLimited = app.fitUpscaleDimensions(3000, 2000, 4, { maxEdge: 8192, maxPixels: 8_000_000 });
+  assert.equal(pixelLimited.valid, true);
+  assert.equal(pixelLimited.limited, true);
+  assert.ok(pixelLimited.width * pixelLimited.height <= 8_000_000);
+  assert.ok(Math.abs(pixelLimited.width / pixelLimited.height - 1.5) < 0.002);
+  assert.deepEqual(JSON.parse(JSON.stringify(app.fitUpscaleDimensions(100, 80, 4, { maxScale: 2 }))), {
+    valid: false, width: 0, height: 0, limited: false, error: "当前模型最多支持 2x 放大",
+  });
+  assert.equal(app.fitUpscaleDimensions(0, 80, 2, {}).valid, false);
+});
+
 test("node migration preserves other providers and an explicitly retained legacy model", () => {
   for (const item of [
     provider("https://images.example.com/v1"),
@@ -90,6 +110,22 @@ test("old nodes without a provider keep a channel that still declares their mode
   app.ensureNodeProvider(explicit147Node);
   assert.equal(explicit147Node.data.model, models.DEFAULT_MODEL);
   assert.equal(explicit147Node.data.providerId, "chosen");
+});
+
+test("new upscale nodes prefer the configured local ComfyUI provider", () => {
+  const app = harness(provider());
+  app.backendConfig.providers.image.items.comfyui = {
+    adapter: "comfyui",
+    baseUrl: "http://127.0.0.1:8188",
+    defaultModel: "comfyui-upscale",
+    models: [{ id: "comfyui-upscale", label: "ComfyUI 放大", capabilities: ["upscale"] }],
+  };
+  const defaults = app.getDefaultUpscaleProviderAndModel();
+  assert.deepEqual(JSON.parse(JSON.stringify(defaults)), { providerId: "comfyui", model: "comfyui-upscale" });
+  const node = { type: "imageUpscale", data: {} };
+  app.ensureNodeProvider(node);
+  assert.equal(node.data.providerId, "comfyui");
+  assert.equal(node.data.model, "comfyui-upscale");
 });
 
 test("both replacement models build OpenAI generation and reference-edit payloads", () => {

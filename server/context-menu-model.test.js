@@ -25,7 +25,7 @@ test("node creation actions are grouped without omissions or duplicates", () => 
     },
     {
       label: "图片编辑",
-      actions: ["add-style-transfer-config", "add-material-transfer-config", "add-product-background-config", "add-seedream-edit", "add-layer-separation", "add-image-compare", "add-image-expand"],
+      actions: ["add-style-transfer-config", "add-material-transfer-config", "add-product-background-config", "add-seedream-edit", "add-layer-separation", "add-image-compare", "add-image-expand", "add-image-upscale"],
     },
     {
       label: "角色",

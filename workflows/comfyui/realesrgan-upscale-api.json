@@ -1,0 +1,28 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": { "image": "__IMAGE_FILENAME__" }
+  },
+  "2": {
+    "class_type": "UpscaleModelLoader",
+    "inputs": { "model_name": "__MODEL__" }
+  },
+  "3": {
+    "class_type": "ImageUpscaleWithModel",
+    "inputs": { "upscale_model": ["2", 0], "image": ["1", 0] }
+  },
+  "4": {
+    "class_type": "ImageScale",
+    "inputs": {
+      "image": ["3", 0],
+      "upscale_method": "lanczos",
+      "width": "__TARGET_WIDTH__",
+      "height": "__TARGET_HEIGHT__",
+      "crop": "disabled"
+    }
+  },
+  "5": {
+    "class_type": "SaveImage",
+    "inputs": { "images": ["4", 0], "filename_prefix": "6mang-upscale" }
+  }
+}

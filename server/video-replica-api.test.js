@@ -47,6 +47,7 @@ function createHarness({ providerOverrides = {}, upstream } = {}) {
     "./kling-cli": { createKlingCli: () => ({}), isKlingProvider: (item) => item.adapter === "kling-cli" },
     "./cprt-provider": require("./cprt-provider"),
     "./image-routing": require("./image-routing"),
+    "./comfyui-manager": { createComfyUiManager: () => ({ ensureReady: async () => ({ ready: true }), status: async () => ({ ready: true }) }) },
     "../public/gpt-image-models": require("../public/gpt-image-models"),
     "../public/video-replica": require("../public/video-replica"),
     "./upstream-http": {
@@ -60,7 +61,7 @@ function createHarness({ providerOverrides = {}, upstream } = {}) {
     require(id) { assert.ok(Object.hasOwn(boundaries, id), `Unexpected dependency: ${id}`); return boundaries[id]; },
     __dirname,
     __filename: serverPath,
-    process: { env: {} },
+    process: { env: { HUOBAO_LOCAL_MODE: "false" } },
     console: { log() {}, error() {} },
     Buffer, URL, Blob, FormData, Response,
     fetch: async (url, options) => {

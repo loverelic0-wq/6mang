@@ -72,7 +72,7 @@ async function checkCanvas() {
     };
     await send("Page.navigate", { url: `http://127.0.0.1:${server.address().port}/` });
     for (let i = 0; i < 100; i++) {
-      if (await evaluate("typeof bootstrap === 'function' && typeof currentAuthUser !== 'undefined' && !!currentAuthUser")) break;
+      if (await evaluate("typeof bootstrap === 'function' && !!document.querySelector('#app-shell')")) break;
       await new Promise((r) => setTimeout(r, 100));
     }
     await new Promise((r) => setTimeout(r, 300));
@@ -95,7 +95,7 @@ async function checkCanvas() {
 async function browserCheck() {
   const frame = () => new Promise(requestAnimationFrame);
   const settle = async () => { await frame(); await frame(); await frame(); };
-  appShell.hidden = false; projectHome.hidden = true; authOverlay.hidden = true;
+  appShell.hidden = false; projectHome.hidden = true;
   const base = defaultState();
   state = { view: { x: 60, y: 100, zoom: 0.55 }, theme: "light", nodes: [], edges: [], groups: [] };
   for (let i = 0; i < 16; i++) {

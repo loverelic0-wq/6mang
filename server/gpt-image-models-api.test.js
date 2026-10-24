@@ -80,6 +80,7 @@ function createApiHarness({ upstream, providerOverrides = {} } = {}) {
     },
     "./cprt-provider": {},
     "./image-routing": require("./image-routing"),
+    "./comfyui-manager": { createComfyUiManager: () => ({ ensureReady: async () => ({ ready: true }), status: async () => ({ ready: true }) }) },
     "../public/gpt-image-models": require("../public/gpt-image-models"),
     "./upstream-http": {
       requestText: async (url, options) => {
@@ -98,7 +99,7 @@ function createApiHarness({ upstream, providerOverrides = {} } = {}) {
     },
     __dirname,
     __filename: serverPath,
-    process: { env: {} },
+    process: { env: { HUOBAO_LOCAL_MODE: "false" } },
     console: { log() {}, error() {} },
     Buffer,
     URL,

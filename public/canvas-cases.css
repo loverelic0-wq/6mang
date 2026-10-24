@@ -1,0 +1,56 @@
+.canvas-cases-dialog { width: min(1280px, 95vw); max-width: 95vw; max-height: 92vh; padding: 0; border: 1px solid #d8d8d5; border-radius: 16px; background: #f8f8f5; color: #242723; box-shadow: 0 24px 100px #0004; font: 14px/1.5 system-ui, sans-serif; }
+.canvas-cases-dialog::backdrop { background: #12181688; backdrop-filter: blur(3px); }
+.canvas-cases-dialog header, .canvas-cases-dialog footer { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px; gap: 24px; }
+.canvas-cases-dialog header { border-bottom: 1px solid #deded8; }
+.canvas-cases-dialog header strong { font-size: 21px; letter-spacing: -.5px; }
+.canvas-cases-dialog p { color: #737970; margin: 5px 0 16px; }
+.canvas-cases-dialog header p { margin: 4px 0 0; }
+.canvas-cases-dialog button { font: inherit; color: inherit; cursor: pointer; border: 1px solid #d6dad1; border-radius: 7px; background: white; padding: 8px 12px; }
+.canvas-cases-dialog button:hover { background: #eeeee8; }
+.canvas-cases-dialog button:disabled { opacity: .5; cursor: wait; }
+.canvas-cases-dialog .case-close { border: 0; background: none; font-size: 27px; padding: 0 7px; }
+.case-layout { display: grid; grid-template-columns: 195px minmax(260px, 1fr) 250px; height: min(650px, 66vh); }
+.case-layout nav { padding: 18px 10px; border-right: 1px solid #deded8; overflow: auto; }
+.case-layout nav button { display: flex; gap: 10px; text-align: left; width: 100%; background: none; border: 0; padding: 12px 8px; margin-bottom: 5px; }
+.case-layout nav button span { color: #93998f; font-size: 12px; padding-top: 2px; }
+.case-layout nav button[aria-current="true"] { background: #e2e9dc; color: #31492b; font-weight: 600; }
+.case-main { padding: 22px 26px; overflow: auto; }
+.case-main h2 { font-size: 21px; margin: 0 0 8px; }
+.case-fields { display: grid; gap: 14px; }
+.case-grid-controls { display: grid; gap: 12px; }
+.case-grid-controls[hidden] { display: none; }
+.case-fields label { display: grid; gap: 6px; font-size: 13px; font-weight: 500; }
+.case-fields input, .case-fields textarea, .case-fields select { box-sizing: border-box; width: 100%; font: inherit; color: #242723; background: white; border: 1px solid #cbd1c5; border-radius: 6px; padding: 9px 10px; }
+.case-fields textarea { resize: vertical; min-height: 70px; line-height: 1.65; }
+.case-fields input[type="color"] { padding: 3px; height: 34px; width: 70px; }
+.case-row { display: flex; gap: 12px; }
+.case-row > * { flex: 1; min-width: 0; }
+.case-fields .case-check { display: flex; align-items: center; gap: 10px; }
+.case-check input { width: auto; }
+.case-note, .case-preview-hint { font-size: 12px; }
+.case-layout aside { padding: 22px 15px; overflow: auto; border-left: 1px solid #deded8; background: #f0f1ec; }
+.case-source-help { font-size: 12px; }
+.case-source-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 14px; }
+.case-source-actions button { font-size: 12px; padding: 6px 8px; }
+.case-source { display: grid; grid-template-columns: 16px 42px 1fr; gap: 8px; align-items: center; padding: 9px 0; border-bottom: 1px solid #dfe2d9; cursor: pointer; }
+.case-source > span:last-child { overflow-wrap: anywhere; font-size: 12px; }
+.case-source small { display: block; color: #838a7e; margin-top: 2px; }
+.case-thumb { display: flex; align-items: center; justify-content: center; width: 42px; height: 42px; background: white; border-radius: 5px; font-size: 23px; overflow: hidden; }
+.case-thumb img { width: 100%; height: 100%; object-fit: contain; }
+.case-empty { font-size: 12px; }
+.case-preview { overflow: auto; max-height: 430px; margin-top: 16px; background: repeating-conic-gradient(#e3e3de 0% 25%, #fff 0% 50%) 50% / 18px 18px; border-radius: 6px; text-align: center; }
+.case-preview canvas { display: block; max-width: 100%; height: auto; margin: 0 auto; cursor: crosshair; touch-action: none; }
+.canvas-cases-dialog footer { border-top: 1px solid #deded8; padding: 14px 24px; min-height: 48px; }
+.case-status { color: #65705e; font-size: 13px; white-space: pre-line; max-height: 75px; overflow: auto; }
+.case-status.error { color: #b13c2a; }
+.canvas-cases-dialog .case-run { background: #334c2c; border-color: #334c2c; color: white; min-width: 130px; padding: 11px 18px; }
+.result-audio { width: 100%; height: 42px; margin: 10px 0; }
+.node[data-case-workflow] .image-preview.has-image { height: 300px; }
+.node[data-case-workflow] .image-preview.has-image img { max-height: 300px; object-fit: contain; }
+@media (max-width: 900px) {
+  .case-layout { grid-template-columns: 145px minmax(200px, 1fr); height: 66vh; }
+  .case-layout aside { grid-column: 1 / -1; max-height: 170px; border-top: 1px solid #deded8; }
+  .case-main { padding: 18px; }
+  .case-layout nav button { font-size: 12px; gap: 5px; }
+  .canvas-cases-dialog header, .canvas-cases-dialog footer { padding: 12px 16px; }
+}
